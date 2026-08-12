@@ -1,13 +1,14 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '2.0.0';
-  const STORAGE_KEY = 'hako.app.v2';
-  const LEGACY_KEYS = ['hako.app.v1'];
+  const APP_VERSION = '3.0.0';
+  const STORAGE_KEY = 'hako.app.v3';
+  const LEGACY_KEYS = ['hako.app.v2','hako.app.v1'];
   const DB_NAME = 'hako-media-v1';
   const DB_STORE = 'media';
   const VIEW_LIMIT = 160;
   const SEARCH_LIMIT = 80;
+  const MAX_MEDIA_URLS = 64;
 
   const $app = document.getElementById('app');
   const $modal = document.getElementById('modal-root');
@@ -20,22 +21,31 @@
   const fmtDate = (v) => v ? new Date(`${v}T12:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) : 'Not set';
   const fmtShortDate = (v) => v ? new Date(`${v}T12:00:00`).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '';
   const normalize = (v='') => String(v).normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
-  const todayISO = () => new Date().toISOString().slice(0,10);
+  const todayISO = () => { const d=new Date(); const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${day}`; };
   const addDays = (date, days) => { const d=new Date(`${date}T12:00:00`); d.setDate(d.getDate()+days); return d.toISOString().slice(0,10); };
   const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+  const localeTag = String(navigator.language || 'en-US');
+  const localeRegion = (localeTag.match(/-([A-Z]{2})\b/i)?.[1] || '').toUpperCase();
+  const initialCurrency = ({PH:'PHP',JP:'JPY',US:'USD',GB:'GBP',SG:'SGD',HK:'HKD',AU:'AUD',CA:'CAD'}[localeRegion]) || (['AT','BE','CY','DE','EE','ES','FI','FR','GR','HR','IE','IT','LT','LU','LV','MT','NL','PT','SI','SK'].includes(localeRegion)?'EUR':'USD');
+  const initialUnits = localeRegion==='US' ? 'in' : 'cm';
 
   const DEFAULT = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     hasOnboarded: false,
     profile: { name: '' },
     project: {
-      id: uid('move'), name:'My Move', moveDate:'', from:'', to:'', currency:'PHP', units:'cm',
+      id: uid('move'), name:'', moveDate:'', from:'', to:'', currency:initialCurrency, units:initialUnits,
       moveType:'Home move', householdSize:1, homeType:'', budget:0, createdAt:nowISO()
     },
     rooms: [], boxes: [], items: [], tasks: [], expenses: [], supplies: [],
-    utilities: [], addressChanges: [], documents: [], contacts: [], packingSessions: [],
+    utilities: [], addressChanges: [], documents: [], contacts: [], packingSessions: [], notes: [],
     activity: [], recentSearches: [],
-    settings: { accent:'pink', haptics:true, reduceEffects:false, compact:false },
+    settings: {
+      accent:'pink', haptics:true, reduceEffects:false, compact:false,
+      showJourney:true, showHomeAlerts:true, showDeclutterHome:true, showRecentActivity:true,
+      customItemCategories:[], customBoxTypes:[], customTaskCategories:[],
+      customExpenseCategories:[], customDocumentCategories:[], customAddressCategories:[]
+    },
     meta: { boxSeq:0, lastBackup:'' },
     ui: {
       tab:'home', tool:null, roomFilter:null, boxFilter:'all', taskFilter:'all', findQuery:'',
@@ -43,15 +53,29 @@
     }
   };
 
+  const BUILTIN_ITEM_CATEGORIES = ['Kitchen','Clothing','Electronics','Documents','Books','Decor','Furniture','Bathroom','Cleaning','Tools','Toys / Kids','Pet','Plants','Food / Pantry','Other'];
+  const BUILTIN_BOX_TYPES = ['Box','Bin','Bag','Suitcase','Crate','Parts bag','Wardrobe box','Document box','Other'];
+  const BUILTIN_TASK_CATEGORIES = ['Plan & Notify','Declutter','Packing','Move Day','After Move','Admin','Utilities','Address Change','Cleaning','Building / Permits','Other'];
+  const BUILTIN_EXPENSE_CATEGORIES = ['Movers','Packing Supplies','Storage','Cleaning','Travel','Deposits','Utilities','Furniture','Repairs','Food','Other'];
+  const BUILTIN_DOCUMENT_CATEGORIES = ['Moving contract','Permit / building','Lease / property','Insurance','Utility confirmation','Receipt reference','School / medical','Other'];
+  const BUILTIN_ADDRESS_CATEGORIES = ['Bank / Finance','Employer','Government','Insurance','Utilities','Shopping / Delivery','Subscriptions','School','Healthcare','Friends / Family','Other'];
+
+  function uniqueOptions(...groups){
+    return [...new Set(groups.flat().map(v=>String(v||'').trim()).filter(Boolean))];
+  }
+
   let state = loadState();
   let derived = {};
+  let derivedDirty = true;
   let deferredInstallPrompt = null;
   let saveTimer = null;
+  let searchRenderTimer = null;
   let toastTimer = null;
   let activeStream = null;
   let scannerLoopId = 0;
   let packingTimer = { endAt:0, startedAt:0, duration:0, interval:null };
   const mediaURLCache = new Map();
+  let mediaObserver = null;
   let mediaDBPromise = null;
   let moneyFormatter = null;
   let moneyFormatterCurrency = '';
@@ -81,9 +105,16 @@
       meta:{...DEFAULT.meta,...(data.meta||{})},
       ui:{...DEFAULT.ui,...(data.ui||{})}
     };
-    for(const k of ['rooms','boxes','items','tasks','expenses','supplies','utilities','addressChanges','documents','contacts','packingSessions','activity','recentSearches']){
+    for(const k of ['rooms','boxes','items','tasks','expenses','supplies','utilities','addressChanges','documents','contacts','packingSessions','notes','activity','recentSearches']){
       if(!Array.isArray(out[k])) out[k]=[];
     }
+    for(const k of ['customItemCategories','customBoxTypes','customTaskCategories','customExpenseCategories','customDocumentCategories','customAddressCategories']){
+      if(!Array.isArray(out.settings[k])) out.settings[k]=[];
+      out.settings[k]=[...new Set(out.settings[k].map(v=>String(v||'').trim()).filter(Boolean))].slice(0,40);
+    }
+    const legacyContentCount=['rooms','boxes','items','tasks','expenses','supplies','utilities','addressChanges','documents','contacts'].reduce((n,k)=>n+out[k].length,0);
+    if(Number(data.schemaVersion||0)<3 && out.project.name==='My Move' && !out.project.moveDate && !out.project.from && !out.project.to && legacyContentCount===0) out.project.name='';
+    if(out.ui.tab==='more' || !['home','rooms','boxes','find'].includes(out.ui.tab)) out.ui.tab='home';
     let seq = Number(out.meta.boxSeq)||0;
     out.boxes.forEach((b,idx)=>{
       seq = Math.max(seq, idx+1);
@@ -96,6 +127,9 @@
       b.loadOrder = Number(b.loadOrder)||0;
       b.missing = !!b.missing;
       b.damaged = !!b.damaged;
+      b.pinned = !!b.pinned;
+      b.labelColor ||= 'pink';
+      if(!['pink','red','orange','yellow','green','blue','purple','gray'].includes(b.labelColor)) b.labelColor='pink';
       b.code ||= makeStableCode(out, b.roomId, idx+1);
     });
     out.meta.boxSeq = Math.max(seq, out.boxes.length);
@@ -110,6 +144,7 @@
       i.serial ||= '';
       i.doNotPack = !!i.doNotPack;
       i.sentimental = !!i.sentimental;
+      i.pinned = !!i.pinned;
       i.saleStatus ||= '';
       i.soldPrice = Number(i.soldPrice)||0;
       i.donationOrg ||= '';
@@ -119,7 +154,8 @@
       delete i.photo;
     });
     out.tasks.forEach(t=>{ t.priority ||= 'normal'; t.templateKey ||= ''; });
-    out.schemaVersion = 2;
+    out.notes.forEach(n=>{ n.title ||= ''; n.body ||= ''; n.roomId ||= ''; n.pinned=!!n.pinned; n.updatedAt ||= n.createdAt || nowISO(); });
+    out.schemaVersion = 3;
     return out;
   }
 
@@ -149,6 +185,7 @@
   }
 
   function commit(message, opts={}){
+    derivedDirty = true;
     if(message){
       state.activity.unshift({id:uid('act'),text:message,at:nowISO()});
       state.activity = state.activity.slice(0,80);
@@ -229,23 +266,56 @@
     if(mediaURLCache.has(id)){ URL.revokeObjectURL(mediaURLCache.get(id)); mediaURLCache.delete(id); }
   }
 
+  function cacheMediaURL(id,url){
+    if(mediaURLCache.has(id)) mediaURLCache.delete(id);
+    mediaURLCache.set(id,url);
+    while(mediaURLCache.size>MAX_MEDIA_URLS){
+      const [oldId,oldUrl]=mediaURLCache.entries().next().value;
+      mediaURLCache.delete(oldId);
+      try{ URL.revokeObjectURL(oldUrl); }catch(_){}
+    }
+  }
+
   async function mediaURL(id){
     if(!id) return '';
-    if(mediaURLCache.has(id)) return mediaURLCache.get(id);
+    if(mediaURLCache.has(id)){
+      const url=mediaURLCache.get(id);
+      mediaURLCache.delete(id); mediaURLCache.set(id,url);
+      return url;
+    }
     try{
       const blob=await mediaGet(id); if(!blob) return '';
-      const url=URL.createObjectURL(blob); mediaURLCache.set(id,url); return url;
+      const url=URL.createObjectURL(blob); cacheMediaURL(id,url); return url;
     }catch(_){ return ''; }
   }
 
-  async function hydrateMedia(root=document){
+  async function hydrateMediaNode(img){
+    const id=img?.dataset?.media;
+    if(!id || img.dataset.hydrated==='1' || img.dataset.loading==='1') return;
+    img.dataset.loading='1';
+    const url=await mediaURL(id);
+    if(url && img.isConnected){ img.src=url; img.dataset.hydrated='1'; }
+    delete img.dataset.loading;
+  }
+
+  function hydrateMedia(root=document){
     const nodes=[...root.querySelectorAll('img[data-media]')];
-    await Promise.all(nodes.map(async img=>{
-      const id=img.dataset.media;
-      if(!id || img.dataset.hydrated==='1') return;
-      const url=await mediaURL(id);
-      if(url){ img.src=url; img.dataset.hydrated='1'; }
-    }));
+    if(!nodes.length) return Promise.resolve();
+    if('IntersectionObserver' in window){
+      if(!mediaObserver){
+        mediaObserver=new IntersectionObserver(entries=>{
+          for(const entry of entries){
+            if(entry.isIntersecting){
+              mediaObserver.unobserve(entry.target);
+              hydrateMediaNode(entry.target);
+            }
+          }
+        },{rootMargin:'220px 0px'});
+      }
+      nodes.forEach(img=>{ if(img.dataset.hydrated!=='1') mediaObserver.observe(img); });
+      return Promise.resolve();
+    }
+    return Promise.all(nodes.slice(0,40).map(hydrateMediaNode));
   }
 
   async function compressPhoto(file){
@@ -287,7 +357,8 @@
     if(changed) saveState(true);
   }
 
-  function rebuildDerived(){
+  function rebuildDerived(force=false){
+    if(!force && !derivedDirty && derived.roomsById) return;
     const roomsById=new Map(state.rooms.map(r=>[r.id,r]));
     const boxesById=new Map(state.boxes.map(b=>[b.id,b]));
     const itemsById=new Map(state.items.map(i=>[i.id,i]));
@@ -300,16 +371,21 @@
     const searchIndex=[];
     for(const i of state.items){
       const b=boxesById.get(i.boxId), r=roomsById.get(i.roomId), dr=roomsById.get(i.destinationRoomId);
-      searchIndex.push({type:'item',id:i.id,title:i.name||'Untitled item',emoji:i.essential?'⭐':'🔎',sub:`${b?b.code+' · '+b.name:'Loose'} · ${r?.name||'No room'}`,search:normalize([i.name,i.category,i.tags,i.notes,i.brand,i.model,i.serial,i.partsFor,i.reassemblyNotes,b?.name,b?.code,r?.name,dr?.name].join(' '))});
+      searchIndex.push({type:'item',id:i.id,title:i.name||'Untitled item',emoji:i.pinned?'📌':i.essential?'⭐':'🔎',sub:`${b?b.code+' · '+b.name:'Loose'} · ${r?.name||'No room'}`,search:normalize([i.name,i.category,i.tags,i.notes,i.brand,i.model,i.serial,i.partsFor,i.reassemblyNotes,b?.name,b?.code,r?.name,dr?.name].join(' '))});
     }
     for(const b of state.boxes){
       const r=roomsById.get(b.roomId);
-      searchIndex.push({type:'box',id:b.id,title:`${b.code} · ${b.name||'Untitled box'}`,emoji:'📦',sub:`${r?.name||'No room'} · ${(itemsByBox.get(b.id)||[]).length} items`,search:normalize([b.code,b.name,b.notes,b.type,b.vehicle,r?.name].join(' '))});
+      searchIndex.push({type:'box',id:b.id,title:`${b.code} · ${b.name||'Untitled box'}`,emoji:b.pinned?'📌':'📦',sub:`${r?.name||'No room'} · ${(itemsByBox.get(b.id)||[]).length} items`,search:normalize([b.code,b.name,b.notes,b.type,b.vehicle,r?.name].join(' '))});
     }
     for(const r of state.rooms){
       searchIndex.push({type:'room',id:r.id,title:r.name,emoji:r.emoji||'🏠',sub:`${(itemsByRoom.get(r.id)||[]).length} items · ${(boxesByRoom.get(r.id)||[]).length} boxes`,search:normalize([r.name,r.destination,r.notes].join(' '))});
     }
+    for(const n of state.notes){
+      const r=roomsById.get(n.roomId);
+      searchIndex.push({type:'note',id:n.id,title:n.title||'Move note',emoji:n.pinned?'📌':'📝',sub:r?.name?`Note · ${r.name}`:'Move note',search:normalize([n.title,n.body,r?.name].join(' '))});
+    }
     derived={roomsById,boxesById,itemsById,itemsByBox,boxesByRoom,itemsByRoom,searchIndex};
+    derivedDirty=false;
   }
 
   function roomById(id){ return derived.roomsById?.get(id); }
@@ -363,7 +439,7 @@
   function applyLaunchParamsOnce(){
     const params=new URLSearchParams(location.search);
     const tab=params.get('tab'), tool=params.get('tool'), action=params.get('action');
-    if(tab&&['home','rooms','boxes','find','more'].includes(tab)) state.ui.tab=tab;
+    if(tab&&['home','rooms','boxes','find'].includes(tab)) state.ui.tab=tab;
     if(tool) state.ui.tool=tool;
     try { history.replaceState({},'',location.pathname+location.hash); } catch(_) {}
     return action;
@@ -387,33 +463,39 @@
   window.addEventListener('appinstalled',()=>{deferredInstallPrompt=null;toast('Hako added to your home screen 💗');render();});
   window.addEventListener('pagehide',()=>{stopScanner(); saveState(true);});
   window.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') saveState(true); });
-  if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(()=>{}));
+  if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js',{updateViaCache:'none'}).then(reg=>reg.update().catch(()=>{})).catch(()=>{}));
 
   function render(){
-    rebuildDerived();
-    document.documentElement.dataset.accent=state.settings.accent||'pink';
-    document.documentElement.classList.toggle('reduce-effects',!!state.settings.reduceEffects);
-    document.documentElement.classList.toggle('compact-mode',!!state.settings.compact);
-    if(!state.hasOnboarded){ renderOnboarding(); return; }
-    $app.innerHTML=`<main class="screen">${topbar()}<section class="content" id="content">${view()}</section>${nav()}</main>`;
-    requestAnimationFrame(()=>hydrateMedia($app));
+    try{
+      if(mediaObserver) $app.querySelectorAll?.('img[data-media]').forEach(img=>mediaObserver.unobserve(img));
+      rebuildDerived();
+      document.documentElement.dataset.accent=state.settings.accent||'pink';
+      document.documentElement.classList.toggle('reduce-effects',!!state.settings.reduceEffects);
+      document.documentElement.classList.toggle('compact-mode',!!state.settings.compact);
+      if(!state.hasOnboarded){ renderOnboarding(); return; }
+      $app.innerHTML=`<main class="screen">${topbar()}<section class="content" id="content">${view()}</section>${nav()}</main>`;
+      requestAnimationFrame(()=>hydrateMedia($app));
+    }catch(err){
+      console.error('Hako render recovery',err);
+      $app.innerHTML=`<section class="onboarding recovery-view"><div class="brand"><img src="icons/icon-192.png" alt="Hako icon"><h1>Hako</h1></div><div class="about-box"><strong>Hako needs to refresh this view.</strong><br>Your saved move data has not been erased. Return Home to rebuild the screen safely.</div><button class="primary-btn wide" data-action="recover-home">Return Home</button></section>`;
+    }
   }
 
   function topbar(){
-    const toolTitle={tasks:'Checklist',declutter:'Declutter','pack-mode':'Pack Mode','move-day':'Move Day',unpacking:'Unpacking',essentials:'Essentials',expenses:'Budget & Expenses',supplies:'Packing Supplies',utilities:'Utilities','address-change':'Address Change',documents:'Documents',contacts:'Contacts','fit-check':'Will It Fit?',reports:'Reports',backup:'Backup & Export',settings:'Settings',about:'About Hako'}[state.ui.tool];
-    const titles={home:'Hako',rooms:'Rooms',boxes:'Boxes',find:'Find My Stuff',more:'More'};
+    const toolTitle={tasks:'Checklist',declutter:'Declutter','pack-mode':'Pack Mode','move-day':'Move Day',unpacking:'Unpacking',essentials:'Essentials',notes:'Move Notes',expenses:'Budget & Expenses',supplies:'Packing Supplies',utilities:'Utilities','address-change':'Address Change',documents:'Documents',contacts:'Contacts','fit-check':'Will It Fit?',reports:'Reports',backup:'Backup & Export',settings:'Settings',about:'About Hako'}[state.ui.tool];
+    const titles={home:'Hako',rooms:'Rooms',boxes:'Boxes',find:'Find My Stuff'};
     if(state.ui.tool) return `<header class="topbar"><button class="icon-btn" data-action="back-tool" aria-label="Back">‹</button><h1>${esc(toolTitle||'Hako')}</h1><button class="icon-btn" data-action="quick-add" aria-label="Quick add">＋</button></header>`;
-    return `<header class="topbar"><button class="icon-btn" data-action="open-project" aria-label="Move settings">☰</button><h1>${esc(titles[state.ui.tab]||'Hako')}</h1><button class="icon-btn" data-action="quick-add" aria-label="Quick add">＋</button></header>`;
+    return `<header class="topbar"><button class="icon-btn" data-action="open-menu" aria-label="Open menu">☰</button><h1>${esc(titles[state.ui.tab]||'Hako')}</h1><button class="icon-btn" data-action="quick-add" aria-label="Quick add">＋</button></header>`;
   }
 
   function nav(){
-    const tabs=[['home','⌂','Home'],['rooms','▦','Rooms'],['boxes','▣','Boxes'],['find','⌕','Find'],['more','♡','More']];
+    const tabs=[['home','⌂','Home'],['rooms','▦','Rooms'],['boxes','▣','Boxes'],['find','⌕','Find']];
     return `<nav class="nav" aria-label="Main navigation">${tabs.map(([id,icon,label])=>`<button class="nav-btn ${state.ui.tab===id&&!state.ui.tool?'active':''}" data-tab="${id}"><span class="nicon">${icon}</span><span>${label}</span></button>`).join('')}</nav>`;
   }
 
   function view(){
     if(state.ui.tool) return renderTool(state.ui.tool);
-    return ({home:homeView,rooms:roomsView,boxes:boxesView,find:findView,more:moreView}[state.ui.tab]||homeView)();
+    return ({home:homeView,rooms:roomsView,boxes:boxesView,find:findView}[state.ui.tab]||homeView)();
   }
 
   function renderOnboarding(){
@@ -421,7 +503,7 @@
       <div class="brand"><img src="icons/icon-192.png" alt="Hako pink box icon"><h1>Hako</h1><p>Moving & Decluttering</p></div>
       <div class="about-box"><strong>Hako (箱)</strong> means “box” in Japanese. Moving often starts with putting everything into boxes, but Hako is really about what comes next—sorting what stays, finding where everything belongs, and making a new space feel like home.</div>
       <div class="feature-chips"><span class="pill">📦 Boxes & QR</span><span class="pill">🏠 Rooms</span><span class="pill">🔎 Smart Find</span><span class="pill">✓ Checklists</span><span class="pill">🚚 Move Day</span><span class="pill">📴 Offline</span></div>
-      <div class="onboarding-actions"><button class="primary-btn wide" data-action="start-setup">Set up my move</button><button class="soft-btn wide" data-action="skip-setup">Explore the empty app</button></div>
+      <div class="onboarding-actions"><button class="primary-btn wide" data-action="start-setup">Set up my move</button><button class="soft-btn wide" data-action="skip-setup">Continue without setup</button></div>
       <p class="tiny center-text">No account required. Core move data stays on this device unless you export it.</p>
     </section>`;
   }
@@ -456,22 +538,30 @@
     const essentials=state.items.filter(i=>i.essential).length;
     const openFirst=state.boxes.filter(b=>b.openFirst||b.priority==='first').length;
     const openTasks=state.tasks.filter(t=>!t.done).slice().sort((a,b)=>(a.due||'9999').localeCompare(b.due||'9999')).slice(0,4);
+    const pinnedItems=state.items.filter(i=>i.pinned).slice(0,4);
+    const pinnedBoxes=state.boxes.filter(b=>b.pinned).slice(0,4);
+    const pinnedNotes=state.notes.filter(n=>n.pinned).slice(0,3);
+    const hasContent=state.rooms.length||state.boxes.length||state.items.length||state.tasks.length||state.expenses.length||state.notes.length;
+    const projectLabel=state.project.name||'Your move';
+
     return `
-      <div class="hero"><div class="eyebrow">${d===null?'Your move hub':d<0?'Move date passed':d===0?'Moving day!':`${d} day${d===1?'':'s'} to go`}</div><h2>${state.profile.name?`Hi, ${esc(state.profile.name)}!`:'Everything in its place.'}</h2><p>${esc(state.project.name||'My Move')}${state.project.from||state.project.to?` · ${esc(state.project.from||'Current home')} → ${esc(state.project.to||'New home')}`:''}</p>${journeyHTML()}</div>
+      <div class="hero"><div class="eyebrow">${d===null?'Your move hub':d<0?'Move date passed':d===0?'Moving day!':`${d} day${d===1?'':'s'} to go`}</div><h2>${state.profile.name?`Hi, ${esc(state.profile.name)}!`:'Everything in its place.'}</h2><p>${esc(projectLabel)}${state.project.from||state.project.to?` · ${esc(state.project.from||'Current home')} → ${esc(state.project.to||'New home')}`:''}</p>${state.settings.showJourney?journeyHTML():''}</div>
       ${deferredInstallPrompt&&!isStandalone()?`<div class="section"><div class="install-banner"><img src="icons/icon-96.png" alt=""><div class="copy"><h4>Install Hako</h4><p>Open it full-screen like a phone app.</p></div><button class="soft-btn small-btn" data-action="install">Install</button></div></div>`:''}
-      ${alerts.length?`<div class="section"><div class="alert-card"><strong>Needs attention</strong>${alerts.slice(0,4).map(a=>`<span>• ${esc(a)}</span>`).join('')}</div></div>`:''}
+      ${!hasContent?`<div class="section"><div class="starter-card"><div class="starter-icon">📦</div><div><h3>Start wherever you are.</h3><p>Hako begins empty on purpose. Add only the rooms, boxes, items and tasks that belong to your move.</p></div><div class="starter-actions"><button class="primary-btn" data-action="add-room">Add first room</button><button class="soft-btn" data-action="open-project">Move setup</button></div></div></div>`:''}
+      ${state.settings.showHomeAlerts&&alerts.length?`<div class="section"><div class="alert-card"><strong>Needs attention</strong>${alerts.slice(0,4).map(a=>`<span>• ${esc(a)}</span>`).join('')}</div></div>`:''}
       <div class="section"><div class="card dashboard-progress"><div class="progress-ring" style="--p:${p}"><strong>${p}%</strong><small>Packed</small></div><div class="copy"><h3>${r}% move-ready</h3><p>${state.items.length} items · ${state.boxes.length} boxes · ${state.rooms.length} rooms · ${state.tasks.filter(t=>!t.done).length} open tasks</p><div class="progress" style="margin-top:10px"><span style="width:${r}%"></span></div></div></div></div>
-      <div class="section"><div class="section-head"><h2 class="section-title">Quick actions</h2></div><div class="quick-grid">
+      <div class="section"><div class="section-head"><h2 class="section-title">Quick actions</h2><button class="soft-btn small-btn" data-action="open-menu">All tools</button></div><div class="quick-grid">
         <button class="quick-card" data-tool="pack-mode"><span class="emoji">⚡</span><span>Quick pack</span></button>
         <button class="quick-card" data-action="add-box"><span class="emoji">📦</span><span>Add box</span></button>
         <button class="quick-card" data-action="open-scan"><span class="emoji">▦</span><span>Scan box</span></button>
         <button class="quick-card" data-action="go-find"><span class="emoji">⌕</span><span>Find stuff</span></button>
       </div></div>
-      <div class="section"><div class="grid-4 compact-stats"><button data-tool="essentials"><span>${essentials}</span><small>Essentials</small></button><button data-tool="declutter"><span>${keep}</span><small>Keep</small></button><button data-tool="declutter"><span>${donate}</span><small>Donate</small></button><button data-tool="declutter"><span>${sell}</span><small>Sell</small></button></div></div>
+      <div class="section"><div class="grid-4 compact-stats"><button data-tool="essentials"><span>${essentials}</span><small>Essentials</small></button><button data-tool="tasks"><span>${state.tasks.filter(t=>!t.done).length}</span><small>Open tasks</small></button><button data-tool="declutter"><span>${donate+sell+trash}</span><small>Leaving</small></button><button data-tool="notes"><span>${state.notes.length}</span><small>Notes</small></button></div></div>
       <div class="section"><div class="grid-2"><div class="card stat"><span class="label">Open-first boxes</span><span class="value">${openFirst}</span></div><div class="card stat"><span class="label">Tasks done</span><span class="value">${taskDone()}/${state.tasks.length}</span></div></div></div>
-      <div class="section"><div class="section-head"><h2 class="section-title">Declutter snapshot</h2><button class="soft-btn small-btn" data-tool="declutter">Open</button></div><div class="grid-4 decision-grid"><button data-tool="declutter">Keep<br><b>${keep}</b></button><button data-tool="declutter">Donate<br><b>${donate}</b></button><button data-tool="declutter">Sell<br><b>${sell}</b></button><button data-tool="declutter">Trash<br><b>${trash}</b></button></div></div>
-      <div class="section"><div class="section-head"><h2 class="section-title">Next tasks</h2><button class="soft-btn small-btn" data-tool="tasks">View all</button></div>${openTasks.length?`<div class="list-card">${openTasks.map(taskRow).join('')}</div>`:empty('📝','No tasks yet','Generate the moving checklist or add a task so nothing gets forgotten.','Open checklist','open-tasks')}</div>
-      ${state.activity.length?`<div class="section"><div class="section-head"><h2 class="section-title">Recent activity</h2></div><div class="list-card">${state.activity.slice(0,4).map(a=>`<div class="row"><div class="row-icon">•</div><div class="row-main"><div class="row-title">${esc(a.text)}</div><div class="row-sub">${new Date(a.at).toLocaleString()}</div></div></div>`).join('')}</div></div>`:''}`;
+      ${(pinnedItems.length||pinnedBoxes.length||pinnedNotes.length)?`<div class="section"><div class="section-head"><h2 class="section-title">Pinned</h2></div><div class="list-card">${pinnedBoxes.map(b=>`<button class="row result-row" data-action="box-detail" data-id="${b.id}"><div class="row-icon">📌</div><div class="row-main"><div class="row-title">${esc(b.code)} · ${esc(b.name)}</div><div class="row-sub">${esc(roomById(b.roomId)?.name||'No room')} · Box</div></div><span>›</span></button>`).join('')}${pinnedItems.map(i=>`<button class="row result-row" data-action="edit-item" data-id="${i.id}"><div class="row-icon">📌</div><div class="row-main"><div class="row-title">${esc(i.name)}</div><div class="row-sub">${esc(roomById(i.roomId)?.name||'No room')} · Item</div></div><span>›</span></button>`).join('')}${pinnedNotes.map(n=>`<button class="row result-row" data-action="edit-note" data-id="${n.id}"><div class="row-icon">📌</div><div class="row-main"><div class="row-title">${esc(n.title||'Move note')}</div><div class="row-sub">Move note</div></div><span>›</span></button>`).join('')}</div></div>`:''}
+      ${state.settings.showDeclutterHome&&state.items.length?`<div class="section"><div class="section-head"><h2 class="section-title">Declutter snapshot</h2><button class="soft-btn small-btn" data-tool="declutter">Open</button></div><div class="grid-4 decision-grid"><button data-tool="declutter">Keep<br><b>${keep}</b></button><button data-tool="declutter">Donate<br><b>${donate}</b></button><button data-tool="declutter">Sell<br><b>${sell}</b></button><button data-tool="declutter">Trash<br><b>${trash}</b></button></div></div>`:''}
+      <div class="section"><div class="section-head"><h2 class="section-title">Next tasks</h2><button class="soft-btn small-btn" data-tool="tasks">View all</button></div>${openTasks.length?`<div class="list-card">${openTasks.map(taskRow).join('')}</div>`:empty('📝','No tasks yet','Add your own tasks or generate a moving checklist only when you want one.','Open checklist','open-tasks')}</div>
+      ${state.settings.showRecentActivity&&state.activity.length?`<div class="section"><div class="section-head"><h2 class="section-title">Recent activity</h2></div><div class="list-card">${state.activity.slice(0,4).map(a=>`<div class="row"><div class="row-icon">•</div><div class="row-main"><div class="row-title">${esc(a.text)}</div><div class="row-sub">${new Date(a.at).toLocaleString()}</div></div></div>`).join('')}</div></div>`:''}`;
   }
 
   function roomPackedPercent(roomId){
@@ -492,6 +582,7 @@
   function boxFilterMatch(b,filter){
     if(filter==='all') return true;
     if(filter==='open-first') return b.openFirst||b.priority==='first';
+    if(filter==='pinned') return !!b.pinned;
     if(filter==='heavy') return Number(b.weight)>=20;
     if(filter==='missing') return !!b.missing;
     if(filter==='damaged') return !!b.damaged;
@@ -501,15 +592,15 @@
   function boxesView(){
     const filter=state.ui.boxFilter||'all';
     let boxes=state.boxes.filter(b=>(!state.ui.roomFilter||b.roomId===state.ui.roomFilter)&&boxFilterMatch(b,filter));
-    boxes=boxes.slice().sort((a,b)=>(Number(b.openFirst||b.priority==='first')-Number(a.openFirst||a.priority==='first'))||((a.loadOrder||9999)-(b.loadOrder||9999))||a.code.localeCompare(b.code));
+    boxes=boxes.slice().sort((a,b)=>(Number(b.pinned)-Number(a.pinned))||(Number(b.openFirst||b.priority==='first')-Number(a.openFirst||a.priority==='first'))||((a.loadOrder||9999)-(b.loadOrder||9999))||a.code.localeCompare(b.code));
     const room=roomById(state.ui.roomFilter);
     return `<div class="section-head"><div><h2 class="section-title">${room?esc(room.name)+' boxes':'Boxes & containers'}</h2><div class="tiny">Stable box codes, packing status, capacity, weight and move-day tracking.</div></div><button class="primary-btn small-btn" data-action="add-box">＋ Box</button></div>
       <div class="toolbar-row">${room?`<button class="soft-btn small-btn" data-action="clear-room-filter">← All rooms</button>`:'<span></span>'}<button class="soft-btn small-btn" data-action="open-scan">▦ Scan / enter code</button></div>
-      <div class="segmented" style="margin-bottom:12px">${['all','open-first','packing','sealed','loaded','unloaded','unpacked','heavy','missing','damaged'].map(s=>`<button class="${filter===s?'active':''}" data-box-filter="${s}">${({'all':'All','open-first':'Open first','heavy':'Heavy','missing':'Missing','damaged':'Damaged'}[s]||statusLabel(s))}</button>`).join('')}</div>
+      <div class="segmented" style="margin-bottom:12px">${['all','pinned','open-first','packing','sealed','loaded','unloaded','unpacked','heavy','missing','damaged'].map(s=>`<button class="${filter===s?'active':''}" data-box-filter="${s}">${({'all':'All','pinned':'Pinned','open-first':'Open first','heavy':'Heavy','missing':'Missing','damaged':'Damaged'}[s]||statusLabel(s))}</button>`).join('')}</div>
       ${boxes.length?`<div class="stack">${boxes.slice(0,VIEW_LIMIT).map(b=>{
         const r=roomById(b.roomId), count=itemsInBox(b.id).length;
-        const flags=[b.openFirst||b.priority==='first'?'OPEN FIRST':'',b.fragile?'FRAGILE':'',b.missing?'MISSING':'',b.damaged?'DAMAGED':''].filter(Boolean);
-        return `<article class="card box-card perf-item"><div class="card-top"><div><div class="eyebrow">${esc(b.code)}</div><h3>${esc(b.name||'Untitled box')}</h3><p>${esc(r?.name||'No room')} · ${count} item${count===1?'':'s'}${b.vehicle?` · ${esc(b.vehicle)}`:''}</p></div><span class="pill ${b.status==='sealed'?'good':b.status==='loaded'?'warn':'gray'}">${statusLabel(b.status)}</span></div><div class="box-meter"><span><b>${clamp(b.capacity,0,100)}%</b> full</span><div class="progress"><span style="width:${clamp(b.capacity,0,100)}%"></span></div><span>${b.weight?`${Number(b.weight).toFixed(1)} ${state.project.units==='in'||state.project.units==='ft'?'lb':'kg'}`:'No weight'}</span></div>${flags.length?`<div class="tag-row">${flags.map(f=>`<span class="pill ${f==='MISSING'||f==='DAMAGED'?'warn':'gray'}">${f}</span>`).join('')}</div>`:''}${b.notes?`<p style="margin-top:10px">${esc(b.notes)}</p>`:''}<div class="mini-actions"><button class="primary-btn small-btn" data-action="box-detail" data-id="${b.id}">Open</button><button class="soft-btn small-btn" data-action="box-label" data-id="${b.id}">Label</button><button class="soft-btn small-btn" data-action="edit-box" data-id="${b.id}">Edit</button></div></article>`;
+        const flags=[b.pinned?'PINNED':'',b.openFirst||b.priority==='first'?'OPEN FIRST':'',b.fragile?'FRAGILE':'',b.missing?'MISSING':'',b.damaged?'DAMAGED':''].filter(Boolean);
+        return `<article class="card box-card perf-item"><div class="card-top"><div><div class="eyebrow"><span class="box-color-dot color-${esc(b.labelColor||'pink')}"></span>${esc(b.code)}</div><h3>${b.pinned?'📌 ':''}${esc(b.name||'Untitled box')}</h3><p>${esc(r?.name||'No room')} · ${count} item${count===1?'':'s'}${b.vehicle?` · ${esc(b.vehicle)}`:''}</p></div><span class="pill ${b.status==='sealed'?'good':b.status==='loaded'?'warn':'gray'}">${statusLabel(b.status)}</span></div><div class="box-meter"><span><b>${clamp(b.capacity,0,100)}%</b> full</span><div class="progress"><span style="width:${clamp(b.capacity,0,100)}%"></span></div><span>${b.weight?`${Number(b.weight).toFixed(1)} ${state.project.units==='in'||state.project.units==='ft'?'lb':'kg'}`:'No weight'}</span></div>${flags.length?`<div class="tag-row">${flags.map(f=>`<span class="pill ${f==='MISSING'||f==='DAMAGED'?'warn':'gray'}">${f}</span>`).join('')}</div>`:''}${b.notes?`<p style="margin-top:10px">${esc(b.notes)}</p>`:''}<div class="mini-actions"><button class="primary-btn small-btn" data-action="box-detail" data-id="${b.id}">Open</button><button class="soft-btn small-btn" data-action="box-label" data-id="${b.id}">Label</button><button class="soft-btn small-btn" data-action="edit-box" data-id="${b.id}">Edit</button></div></article>`;
       }).join('')}</div>${boxes.length>VIEW_LIMIT?`<p class="tiny center-text">Showing first ${VIEW_LIMIT} matching boxes for smoother scrolling.</p>`:''}`:empty('📦','No boxes here','Create a box, bag, bin, suitcase or crate and assign it to a room.','Add a box','add-box')}`;
   }
 
@@ -538,7 +629,7 @@
 
   function findResultsHTML(raw){
     const q=(raw||'').trim();
-    if(!q) return empty('🔎','Where did I pack it?','Search item names, box codes, rooms, categories, tags, serial numbers, brands and notes. Try “passport”, “charger” or “KITCH-003”.');
+    if(!q) return empty('🔎','Where did I pack it?','Search item names, box codes, rooms, categories, tags, serial numbers, brands and move notes. Try “passport”, “charger” or “KITCH-003”.');
     const results=performSearch(q);
     return results.length?`<div class="list-card">${results.map(x=>`<button class="row result-row" data-result-type="${x.type}" data-id="${x.id}"><div class="row-icon">${x.emoji}</div><div class="row-main"><div class="row-title">${esc(x.title)}</div><div class="row-sub">${esc(x.sub)}</div></div><span>›</span></button>`).join('')}</div>`:empty('🕵️','Nothing found','Try fewer words, a room name, category, item name, tag or box code.');
   }
@@ -557,6 +648,7 @@
       ['move-day','🚚','Move Day','Load, unload, missing and damaged boxes'],
       ['unpacking','🏡','Unpacking','Open-first and room setup progress'],
       ['essentials','⭐','Essentials','First-night and do-not-pack items'],
+      ['notes','📝','Move Notes','Measurements, reminders and setup ideas'],
       ['expenses','₱','Budget','Budget, expenses and selling proceeds'],
       ['supplies','▧','Supplies','Boxes, tape and packing materials'],
       ['utilities','⚡','Utilities','Disconnect old and connect new services'],
@@ -579,6 +671,7 @@
     if(tool==='move-day') return moveDayView();
     if(tool==='unpacking') return unpackingView();
     if(tool==='essentials') return essentialsView();
+    if(tool==='notes') return notesView();
     if(tool==='expenses') return expensesView();
     if(tool==='supplies') return suppliesView();
     if(tool==='utilities') return utilitiesView();
@@ -671,6 +764,12 @@
       <div class="section"><div class="section-head"><h2 class="section-title">Keep with you</h2></div>${doNotPack.length?`<div class="list-card">${doNotPack.map(i=>itemRow(i)).join('')}</div>`:empty('👜','Nothing marked do-not-pack','Use this for passports, keys, medication, phone chargers and valuables you should carry yourself.')}</div>`;
   }
 
+  function notesView(){
+    const notes=state.notes.slice().sort((a,b)=>Number(b.pinned)-Number(a.pinned)||String(b.updatedAt||'').localeCompare(String(a.updatedAt||'')));
+    return `<div class="section-head"><div><h2 class="section-title">Move notes</h2><div class="tiny">Measurements, reminders, room ideas, mover instructions and anything you want to remember.</div></div><button class="primary-btn small-btn" data-action="add-note">＋ Note</button></div>
+      ${notes.length?`<div class="stack">${notes.slice(0,VIEW_LIMIT).map(n=>`<div class="card perf-item"><div class="card-top"><div><div class="row-title">${n.pinned?'📌 ':''}${esc(n.title||'Move note')}</div><div class="row-sub">${esc(roomById(n.roomId)?.name||'General')}${n.updatedAt?` · ${new Date(n.updatedAt).toLocaleDateString()}`:''}</div></div><button class="icon-btn mini-icon" data-action="edit-note" data-id="${n.id}">⋯</button></div>${n.body?`<p class="wrap-text note-body">${esc(n.body)}</p>`:''}</div>`).join('')}</div>`:empty('📝','No move notes yet','Add measurements, room ideas, questions for movers, parking instructions, reminders or anything else you want Hako to remember.','Add note','add-note')}`;
+  }
+
   function expensesView(){
     const total=expenseTotal(), budget=Number(state.project.budget)||0, proceeds=soldProceeds(), net=Math.max(0,total-proceeds);
     const cats={}; state.expenses.forEach(e=>cats[e.category||'Other']=(cats[e.category||'Other']||0)+(Number(e.amount)||0));
@@ -679,12 +778,12 @@
       ${budget?`<div class="section"><div class="card"><div class="card-top"><div><div class="row-title">Budget used</div><div class="row-sub">${pct}% · ${money(Math.max(0,budget-total))} remaining</div></div><span class="pill ${total>budget?'warn':'good'}">${total>budget?'Over budget':'On track'}</span></div><div class="progress" style="margin-top:12px"><span style="width:${pct}%"></span></div></div></div>`:''}
       <div class="section"><button class="primary-btn wide" data-action="add-expense">＋ Add expense</button></div>
       ${Object.keys(cats).length?`<div class="section"><div class="section-head"><h2 class="section-title">By category</h2></div><div class="list-card">${Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<div class="row"><div class="row-icon">₱</div><div class="row-main"><div class="row-title">${esc(k)}</div><div class="row-sub">${money(v)}</div></div></div>`).join('')}</div></div>`:''}
-      <div class="section"><div class="section-head"><h2 class="section-title">Expenses</h2></div>${state.expenses.length?`<div class="list-card">${state.expenses.slice().reverse().slice(0,VIEW_LIMIT).map(e=>`<div class="row"><div class="row-icon">🧾</div><div class="row-main"><div class="row-title">${esc(e.title)}</div><div class="row-sub">${esc(e.category||'Other')} · ${money(e.amount)}</div></div><button class="icon-btn mini-icon" data-action="delete-expense" data-id="${e.id}">×</button></div>`).join('')}</div>`:empty('💸','No moving expenses yet','Track movers, supplies, storage, cleaning, travel, deposits and unexpected costs.')}</div>`;
+      <div class="section"><div class="section-head"><h2 class="section-title">Expenses</h2></div>${state.expenses.length?`<div class="list-card">${state.expenses.slice().reverse().slice(0,VIEW_LIMIT).map(e=>`<div class="row"><div class="row-icon">🧾</div><div class="row-main"><div class="row-title">${esc(e.title)}</div><div class="row-sub">${esc(e.category||'Other')} · ${money(e.amount)}</div></div><button class="icon-btn mini-icon" data-action="edit-expense" data-id="${e.id}" aria-label="Edit expense">⋯</button></div>`).join('')}</div>`:empty('💸','No moving expenses yet','Track movers, supplies, storage, cleaning, travel, deposits and unexpected costs.')}</div>`;
   }
 
   function suppliesView(){
     const total=state.supplies.reduce((n,s)=>n+(Number(s.cost)||0),0), bought=state.supplies.filter(s=>s.bought).length;
-    return `<div class="grid-2"><div class="card stat"><span class="label">Bought</span><span class="value">${bought}/${state.supplies.length}</span></div><div class="card stat"><span class="label">Estimated supplies</span><span class="value small-value">${money(total)}</span></div></div><div class="section-head section"><div><h2 class="section-title">Packing supplies</h2><div class="tiny">Track what you have and what you still need.</div></div><button class="primary-btn small-btn" data-action="add-supply">＋ Supply</button></div>${state.supplies.length?`<div class="list-card">${state.supplies.map(s=>`<div class="row"><button class="check ${s.bought?'done':''}" data-action="toggle-supply" data-id="${s.id}">${s.bought?'✓':''}</button><div class="row-main"><div class="row-title">${esc(s.name)}</div><div class="row-sub">Need ${esc(s.qty||'1')} ${s.unit?esc(s.unit):''}${s.cost?` · ${money(s.cost)}`:''}</div></div><button class="icon-btn mini-icon" data-action="delete-supply" data-id="${s.id}">×</button></div>`).join('')}</div>`:empty('📦','Supply list is empty','Add boxes, tape, markers, labels, bubble wrap, paper or anything else you need.','Add supply','add-supply')}`;
+    return `<div class="grid-2"><div class="card stat"><span class="label">Bought</span><span class="value">${bought}/${state.supplies.length}</span></div><div class="card stat"><span class="label">Estimated supplies</span><span class="value small-value">${money(total)}</span></div></div><div class="section-head section"><div><h2 class="section-title">Packing supplies</h2><div class="tiny">Track what you have and what you still need.</div></div><button class="primary-btn small-btn" data-action="add-supply">＋ Supply</button></div>${state.supplies.length?`<div class="list-card">${state.supplies.map(s=>`<div class="row"><button class="check ${s.bought?'done':''}" data-action="toggle-supply" data-id="${s.id}">${s.bought?'✓':''}</button><div class="row-main"><div class="row-title">${esc(s.name)}</div><div class="row-sub">Need ${esc(s.qty||'1')} ${s.unit?esc(s.unit):''}${s.cost?` · ${money(s.cost)}`:''}</div></div><button class="icon-btn mini-icon" data-action="edit-supply" data-id="${s.id}" aria-label="Edit supply">⋯</button></div>`).join('')}</div>`:empty('📦','Supply list is empty','Add boxes, tape, markers, labels, bubble wrap, paper or anything else you need.','Add supply','add-supply')}`;
   }
 
   function utilitiesView(){
@@ -725,24 +824,50 @@
   }
 
   function backupView(){
-    return `<div class="about-box"><strong>Local-first backup</strong><br>Core data is stored in this browser. Item photos are kept in IndexedDB instead of the main app record so adding photos causes far less lag. Export a backup before changing phones or clearing browser data.</div><div class="section stack"><button class="primary-btn wide" data-action="export-json">⇩ Export full Hako backup</button><button class="soft-btn wide" data-action="export-csv">⇩ Export item inventory (.csv)</button><button class="soft-btn wide" data-action="import-json">⇧ Restore from backup</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div class="section"><div class="card"><div class="row-title">Included</div><div class="row-sub wrap-text">Move setup, rooms, boxes, items, compressed item photos, declutter data, tasks, budget, supplies, utilities, address changes, documents, contacts, sessions, activity and settings.</div></div></div>`;
+    return `<div class="about-box"><strong>Local-first backup</strong><br>Core data is stored in this browser. Item photos are kept in IndexedDB instead of the main app record so adding photos causes far less lag. Export a backup before changing phones or clearing browser data.</div><div class="section stack"><button class="primary-btn wide" data-action="export-json">⇩ Export full Hako backup</button><button class="soft-btn wide" data-action="export-csv">⇩ Export item inventory (.csv)</button><button class="soft-btn wide" data-action="import-json">⇧ Restore from backup</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div class="section"><div class="card"><div class="row-title">Included</div><div class="row-sub wrap-text">Move setup, rooms, boxes, items, compressed item photos, declutter data, tasks, budget, supplies, utilities, address changes, documents, contacts, move notes, sessions, activity, custom categories and settings.</div></div></div>`;
   }
 
   function settingsView(){
+    const customSection=(kind,title,values,helper)=>`<div class="card"><div class="section-head settings-head"><div><div class="row-title">${title}</div><div class="row-sub wrap-text">${helper}</div></div><button class="soft-btn small-btn" data-action="add-custom-option" data-value="${kind}">＋ Add</button></div>${values.length?`<div class="custom-chip-list">${values.map(v=>`<span class="custom-chip">${esc(v)}<button data-action="remove-custom-option" data-value="${kind}" data-option="${esc(v)}" aria-label="Remove ${esc(v)}">×</button></span>`).join('')}</div>`:'<div class="tiny">No custom options yet. Built-in suggestions remain available.</div>'}</div>`;
     return `<div class="stack">
-      <button class="card text-left" data-action="open-project"><div class="row-title">Move setup</div><div class="row-sub">${esc(state.project.name)} · ${fmtDate(state.project.moveDate)}</div></button>
-      <div class="card"><div class="row-title">Signature look</div><div class="row-sub wrap-text" style="margin:6px 0 12px">Hako uses light pink as its signature app color.</div><span class="pill">💗 Light Pink</span></div>
+      <button class="card text-left" data-action="open-project"><div class="row-title">Move setup</div><div class="row-sub">${esc(state.project.name||'Your move')} · ${fmtDate(state.project.moveDate)}</div></button>
+
+      <div class="card"><div class="row-title">Signature look</div><div class="row-sub wrap-text" style="margin:6px 0 12px">Hako keeps its light-pink signature while letting you simplify how much information appears on the home screen.</div><span class="pill">💗 Light Pink</span></div>
+
       <label class="setting-row card"><div><div class="row-title">Haptics</div><div class="row-sub">Tiny tap feedback when supported</div></div><input type="checkbox" data-setting="haptics" ${state.settings.haptics?'checked':''}></label>
-      <label class="setting-row card"><div><div class="row-title">Reduced visual effects</div><div class="row-sub">Flatter shadows for older or slower phones</div></div><input type="checkbox" data-setting="reduceEffects" ${state.settings.reduceEffects?'checked':''}></label>
+      <label class="setting-row card"><div><div class="row-title">Reduced visual effects</div><div class="row-sub">Lighter shadows and motion for slower phones</div></div><input type="checkbox" data-setting="reduceEffects" ${state.settings.reduceEffects?'checked':''}></label>
       <label class="setting-row card"><div><div class="row-title">Compact mode</div><div class="row-sub">Fit more information on screen</div></div><input type="checkbox" data-setting="compact" ${state.settings.compact?'checked':''}></label>
-      <div class="card"><div class="row-title">Units & currency</div><div class="row-sub">${esc(state.project.units)} · ${esc(state.project.currency)}</div></div>
+
+      <div class="settings-label">Home screen</div>
+      <label class="setting-row card"><div><div class="row-title">Move journey</div><div class="row-sub">Show Plan → Declutter → Pack → Move → Home</div></div><input type="checkbox" data-setting="showJourney" ${state.settings.showJourney?'checked':''}></label>
+      <label class="setting-row card"><div><div class="row-title">Attention alerts</div><div class="row-sub">Show overdue, missing, heavy and do-not-pack alerts</div></div><input type="checkbox" data-setting="showHomeAlerts" ${state.settings.showHomeAlerts?'checked':''}></label>
+      <label class="setting-row card"><div><div class="row-title">Declutter snapshot</div><div class="row-sub">Show Keep / Donate / Sell / Trash counts</div></div><input type="checkbox" data-setting="showDeclutterHome" ${state.settings.showDeclutterHome?'checked':''}></label>
+      <label class="setting-row card"><div><div class="row-title">Recent activity</div><div class="row-sub">Show your latest Hako changes on Home</div></div><input type="checkbox" data-setting="showRecentActivity" ${state.settings.showRecentActivity?'checked':''}></label>
+
+      <div class="settings-label">Your own categories</div>
+      ${customSection('item','Item categories',state.settings.customItemCategories,'Add categories that fit your belongings. Nothing is added to your inventory automatically.')}
+      ${customSection('box','Container types',state.settings.customBoxTypes,'Add your own container types such as tote, balikbayan box or storage case.')}
+      ${customSection('task','Task categories',state.settings.customTaskCategories,'Add task groupings that match your move, building or household.')}
+      ${customSection('expense','Expense categories',state.settings.customExpenseCategories,'Create your own cost categories for how you actually move.')}
+      ${customSection('document','Document categories',state.settings.customDocumentCategories,'Customize how permits, receipts, contracts and references are grouped.')}
+      ${customSection('address','Address-change categories',state.settings.customAddressCategories,'Add your own groups for organizations and people to notify.')}
+
+      <div class="card"><div class="row-title">Units & currency</div><div class="row-sub">${esc(state.project.units)} · ${esc(state.project.currency)} · change anytime in Move setup</div></div>
+      <div class="card"><div class="row-title">First-time friendly by design</div><div class="row-sub wrap-text">Hako never inserts sample rooms, boxes, items, contacts or expenses. Optional starter checklists and utility/address lists are only created when you explicitly choose them.</div></div>
       <div class="card"><div class="row-title">Install on iPhone</div><div class="row-sub wrap-text">In Safari: Share → Add to Home Screen. Hako then launches in standalone app mode.</div></div>
       <button class="danger-btn wide" data-action="reset-app">Erase all Hako data</button>
     </div>`;
   }
 
   function aboutView(){
-    return `<div class="brand about-brand"><img src="icons/icon-192.png" alt="Hako icon"><h1>Hako</h1><p>Version ${APP_VERSION}</p></div><div class="about-box"><strong>Hako (箱)</strong> means “box” in Japanese. Moving often starts with putting everything into boxes, but Hako is really about what comes next—sorting what stays, finding where everything belongs, and making a new space feel like home.</div><div class="section"><div class="section-head"><h2 class="section-title">What’s New · ${APP_VERSION}</h2></div><div class="list-card"><div class="row"><div class="row-icon">⚡</div><div class="row-main"><div class="row-title">Mega feature + stability build</div><div class="row-sub wrap-text">Stable box codes, faster search, IndexedDB photos, Quick Pack, focus timer, enhanced box metadata, Move Day flags, first-night essentials, utilities, address changes, document register, contacts, budget reports, fit checker, generated checklists and more.</div></div></div><div class="row"><div class="row-icon">🛠</div><div class="row-main"><div class="row-title">Performance fixes</div><div class="row-sub wrap-text">Search no longer re-renders the entire app on every keystroke, long lists are capped, visual blur effects were reduced, route shortcuts no longer trap navigation, and task sorting no longer mutates saved order.</div></div></div></div></div><div class="section"><div class="card"><div class="row-title">Privacy</div><div class="row-sub wrap-text">No account is required. This build does not send your inventory to a Hako server. Exported backups are files you control.</div></div></div>`;
+    return `<div class="brand about-brand"><img src="icons/icon-192.png" alt="Hako icon"><h1>Hako</h1><p>Version ${APP_VERSION}</p></div>
+      <div class="about-box"><strong>Hako (箱)</strong> means “box” in Japanese. Moving often starts with putting everything into boxes, but Hako is really about what comes next—sorting what stays, finding where everything belongs, and making a new space feel like home.</div>
+      <div class="section"><div class="section-head"><h2 class="section-title">What’s New · ${APP_VERSION}</h2></div><div class="list-card">
+        <div class="row"><div class="row-icon">☰</div><div class="row-main"><div class="row-title">Cleaner navigation</div><div class="row-sub wrap-text">Home, Rooms, Boxes and Find stay in the bottom bar. Everything else now lives in a fast hamburger menu grouped by purpose.</div></div></div>
+        <div class="row"><div class="row-icon">📝</div><div class="row-main"><div class="row-title">More organization tools</div><div class="row-sub wrap-text">Move Notes, pinned items and boxes, label colors, editable expenses and supplies, custom item/container/task/expense/document/address categories, and a more configurable Home screen.</div></div></div>
+        <div class="row"><div class="row-icon">🛠</div><div class="row-main"><div class="row-title">Stability and performance pass</div><div class="row-sub wrap-text">Lazy photo hydration, bounded media memory, fewer full-state writes while typing, cleaner drawer navigation, safer migrations, updated caching and large-list safeguards.</div></div></div>
+      </div></div>
+      <div class="section"><div class="card"><div class="row-title">Privacy</div><div class="row-sub wrap-text">No account is required. Hako does not send your inventory to a Hako server. Exported backups are files you control.</div></div></div>`;
   }
 
   function empty(icon,title,text,buttonText,action){ return `<div class="empty"><div class="big">${icon}</div><h3>${title}</h3><p>${text}</p>${buttonText?`<button class="primary-btn" data-action="${action}">${buttonText}</button>`:''}</div>`; }
@@ -750,7 +875,7 @@
   function itemThumb(i){
     if(i.photoRef) return `<img class="item-thumb" data-media="${esc(i.photoRef)}" alt="" loading="lazy" decoding="async">`;
     if(i.legacyPhoto) return `<img class="item-thumb" src="${i.legacyPhoto}" alt="" loading="lazy" decoding="async">`;
-    return `<span class="item-thumb placeholder">${i.essential?'⭐':'•'}</span>`;
+    return `<span class="item-thumb placeholder">${i.pinned?'📌':i.essential?'⭐':'•'}</span>`;
   }
   function itemRow(i){
     const b=boxById(i.boxId),r=roomById(i.roomId);
@@ -765,17 +890,65 @@
       if(opts.focus!==false){ const el=$modal.querySelector('input:not([type=hidden]):not([readonly]),select,textarea'); setTimeout(()=>el?.focus(),40); }
     });
   }
-  function closeModal(){ stopScanner(); $modal.innerHTML=''; }
+  function closeModal(){
+    stopScanner();
+    if(mediaObserver) $modal.querySelectorAll?.('img[data-media]').forEach(img=>mediaObserver.unobserve(img));
+    $modal.innerHTML='';
+  }
+
+  const MENU_GROUPS = [
+    ['Main',[
+      ['tab','home','⌂','Home','Move overview and quick actions'],
+      ['tab','rooms','▦','Rooms','Organize everything by room'],
+      ['tab','boxes','▣','Boxes','Containers, labels and contents'],
+      ['tab','find','⌕','Find My Stuff','Search items, boxes and rooms']
+    ]],
+    ['Plan & Pack',[
+      ['tool','tasks','✓','Checklist','Tasks and move timeline'],
+      ['tool','declutter','♻','Declutter','Keep, donate, sell or trash'],
+      ['tool','pack-mode','⚡','Pack Mode','Fast focused packing'],
+      ['tool','essentials','⭐','Essentials','First-night and do-not-pack'],
+      ['tool','move-day','🚚','Move Day','Load, unload and final sweep'],
+      ['tool','unpacking','🏡','Unpacking','Settle into the new space']
+    ]],
+    ['Organize',[
+      ['tool','notes','📝','Move Notes','Measurements, reminders and ideas'],
+      ['tool','expenses','₱','Budget & Expenses','Track moving costs'],
+      ['tool','supplies','▧','Packing Supplies','Boxes, tape and materials'],
+      ['tool','utilities','⚡','Utilities','Old and new services'],
+      ['tool','address-change','✉','Address Change','Track address updates'],
+      ['tool','documents','▤','Documents','Permits and references'],
+      ['tool','contacts','☏','Contacts','Movers, admin and helpers'],
+      ['tool','fit-check','↔','Will It Fit?','Furniture and doorway check'],
+      ['tool','reports','◫','Reports','Readiness and inventory summary']
+    ]],
+    ['Hako',[
+      ['tool','backup','⇩','Backup & Export','Protect or move your data'],
+      ['tool','settings','⚙','Settings','Customize Hako'],
+      ['tool','about','♡','About Hako','Meaning, privacy and updates']
+    ]]
+  ];
+
+  function openMenu(){
+    stopScanner();
+    const projectLabel=state.project.name||'Your move';
+    const sub=[state.project.moveDate?fmtDate(state.project.moveDate):'',state.project.to||''].filter(Boolean).join(' · ') || 'Set up Hako your way';
+    $modal.innerHTML=`<div class="drawer-backdrop" data-action="close-modal"><aside class="drawer" role="dialog" aria-modal="true" aria-label="Hako menu" data-drawer>
+      <div class="drawer-head"><img src="icons/icon-96.png" alt=""><div><strong>Hako</strong><span>${esc(projectLabel)}</span></div><button class="icon-btn" data-action="close-modal" aria-label="Close menu">×</button></div>
+      <button class="drawer-project" data-action="open-project"><div><b>${esc(projectLabel)}</b><span>${esc(sub)}</span></div><span>›</span></button>
+      <div class="drawer-scroll">${MENU_GROUPS.map(([group,items])=>`<section class="drawer-group"><h2>${group}</h2>${items.map(([kind,id,icon,title,desc])=>`<button class="drawer-link ${(kind==='tab'&&state.ui.tab===id&&!state.ui.tool)||(kind==='tool'&&state.ui.tool===id)?'active':''}" ${kind==='tab'?`data-tab="${id}"`:`data-tool="${id}"`}><span class="drawer-icon">${icon}</span><span class="drawer-copy"><b>${title}</b><small>${desc}</small></span><span class="drawer-chevron">›</span></button>`).join('')}</section>`).join('')}</div>
+    </aside></div>`;
+  }
 
   function openSetup(first=false){
     const p=state.project;
     openSheet(first?'Set up your move':'Move setup',`<form class="form" id="project-form">
       <div class="field"><label>Your name (optional)</label><input name="name" maxlength="40" value="${esc(state.profile.name)}" placeholder="Your name"></div>
-      <div class="grid-2"><div class="field"><label>Move name</label><input name="projectName" maxlength="60" value="${esc(p.name)}" placeholder="New Apartment"></div><div class="field"><label>Move type</label><select name="moveType">${['Home move','Decluttering only','Storage / organization','Room reset'].map(x=>`<option ${p.moveType===x?'selected':''}>${x}</option>`).join('')}</select></div></div>
+      <div class="grid-2"><div class="field"><label>Move name (optional)</label><input name="projectName" maxlength="60" value="${esc(p.name)}" placeholder="New Apartment"></div><div class="field"><label>Move type</label><select name="moveType">${['Home move','Decluttering only','Storage / organization','Room reset','Office move','Other'].map(x=>`<option ${p.moveType===x?'selected':''}>${x}</option>`).join('')}</select></div></div>
       <div class="grid-2"><div class="field"><label>Move date</label><input type="date" name="moveDate" value="${esc(p.moveDate)}"></div><div class="field"><label>Household size</label><input type="number" min="1" max="30" name="householdSize" value="${Number(p.householdSize)||1}"></div></div>
       <div class="field"><label>Home type</label><select name="homeType"><option value="">Not set</option>${['Condo','Apartment','House','Dorm / room','Office','Other'].map(x=>`<option ${p.homeType===x?'selected':''}>${x}</option>`).join('')}</select></div>
       <div class="grid-2"><div class="field"><label>Moving from</label><input name="from" maxlength="100" value="${esc(p.from)}" placeholder="Current home"></div><div class="field"><label>Moving to</label><input name="to" maxlength="100" value="${esc(p.to)}" placeholder="New home"></div></div>
-      <div class="grid-3"><div class="field"><label>Currency</label><select name="currency">${['PHP','JPY','USD','EUR','GBP','SGD','HKD','AUD','CAD'].map(x=>`<option ${p.currency===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Measurements</label><select name="units">${['cm','m','in','ft'].map(x=>`<option ${p.units===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Moving budget</label><input type="number" min="0" step="0.01" name="budget" value="${Number(p.budget)||''}" placeholder="0"></div></div>
+      <div class="grid-3"><div class="field"><label>Currency</label><select name="currency">${['PHP','JPY','USD','EUR','GBP','SGD','HKD','AUD','CAD','KRW','CNY','TWD','NZD','CHF','THB','MYR','IDR','INR','AED'].map(x=>`<option ${p.currency===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Measurements</label><select name="units">${['cm','m','in','ft'].map(x=>`<option ${p.units===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Moving budget</label><input type="number" min="0" step="0.01" name="budget" value="${Number(p.budget)||''}" placeholder="0"></div></div>
       <div class="form-actions"><button type="button" class="soft-btn" data-action="close-modal">Cancel</button><button class="primary-btn" type="submit">Save move</button></div>
     </form>`,{focus:!first});
   }
@@ -801,34 +974,36 @@
   }
 
   function openBoxForm(id){
-    const b=state.boxes.find(x=>x.id===id)||{name:'',roomId:'',type:'Box',status:'empty',notes:'',fragile:false,openFirst:false,capacity:0,weight:0,priority:'normal',vehicle:'',loadOrder:0,missing:false,damaged:false,code:''};
+    const b=state.boxes.find(x=>x.id===id)||{name:'',roomId:'',type:'Box',status:'empty',notes:'',fragile:false,openFirst:false,capacity:0,weight:0,priority:'normal',vehicle:'',loadOrder:0,missing:false,damaged:false,pinned:false,labelColor:'pink',code:''};
+    const boxTypes=uniqueOptions(BUILTIN_BOX_TYPES,state.settings.customBoxTypes,[b.type]);
     openSheet(id?'Edit box':'Add box',`<form class="form" id="box-form" data-id="${id||''}">
       ${id?`<div class="field"><label>Stable box code</label><input readonly value="${esc(b.code)}"><div class="tiny">This code stays the same even if the box moves rooms.</div></div>`:''}
       <div class="field"><label>Box name</label><input required name="name" maxlength="70" value="${esc(b.name)}" placeholder="Kitchen essentials"></div>
-      <div class="grid-2"><div class="field"><label>Room</label><select name="roomId"><option value="">No room</option>${state.rooms.map(r=>`<option value="${r.id}" ${b.roomId===r.id?'selected':''}>${esc(r.name)}</option>`).join('')}</select></div><div class="field"><label>Container type</label><select name="type">${['Box','Bin','Bag','Suitcase','Crate','Parts bag','Other'].map(x=>`<option ${b.type===x?'selected':''}>${x}</option>`).join('')}</select></div></div>
-      <div class="grid-2"><div class="field"><label>Status</label><select name="status">${['empty','packing','sealed','loaded','unloaded','unpacked'].map(x=>`<option value="${x}" ${b.status===x?'selected':''}>${statusLabel(x)}</option>`).join('')}</select></div><div class="field"><label>Priority</label><select name="priority">${[['normal','Normal'],['first','Open first'],['high','High'],['low','Low']].map(([v,l])=>`<option value="${v}" ${b.priority===v?'selected':''}>${l}</option>`).join('')}</select></div></div>
+      <div class="grid-2"><div class="field"><label>Room</label><select name="roomId"><option value="">No room</option>${state.rooms.map(r=>`<option value="${r.id}" ${b.roomId===r.id?'selected':''}>${esc(r.name)}</option>`).join('')}</select></div><div class="field"><label>Container type</label><select name="type">${boxTypes.map(x=>`<option ${b.type===x?'selected':''}>${esc(x)}</option>`).join('')}</select></div></div>
+      <div class="grid-3"><div class="field"><label>Status</label><select name="status">${['empty','packing','sealed','loaded','unloaded','unpacked'].map(x=>`<option value="${x}" ${b.status===x?'selected':''}>${statusLabel(x)}</option>`).join('')}</select></div><div class="field"><label>Priority</label><select name="priority">${[['normal','Normal'],['first','Open first'],['high','High'],['low','Low']].map(([v,l])=>`<option value="${v}" ${b.priority===v?'selected':''}>${l}</option>`).join('')}</select></div><div class="field"><label>Label color</label><select name="labelColor">${[['pink','Pink'],['red','Red'],['orange','Orange'],['yellow','Yellow'],['green','Green'],['blue','Blue'],['purple','Purple'],['gray','Gray']].map(([v,l])=>`<option value="${v}" ${b.labelColor===v?'selected':''}>${l}</option>`).join('')}</select></div></div>
       <div class="grid-2"><div class="field"><label>Capacity %</label><input type="number" min="0" max="100" step="5" name="capacity" value="${clamp(b.capacity,0,100)}"></div><div class="field"><label>Approx. weight (${state.project.units==='in'||state.project.units==='ft'?'lb':'kg'})</label><input type="number" min="0" step="0.1" name="weight" value="${Number(b.weight)||''}"></div></div>
       <div class="grid-2"><div class="field"><label>Vehicle / trip</label><input name="vehicle" maxlength="40" value="${esc(b.vehicle||'')}" placeholder="Truck 1"></div><div class="field"><label>Load order</label><input type="number" min="0" step="1" name="loadOrder" value="${Number(b.loadOrder)||''}" placeholder="1"></div></div>
       <div class="field"><label>Notes</label><textarea name="notes" maxlength="600" placeholder="Plates, mugs, charger…">${esc(b.notes||'')}</textarea></div>
-      <div class="grid-2"><label class="check-card"><input type="checkbox" name="fragile" ${b.fragile?'checked':''}> Fragile</label><label class="check-card"><input type="checkbox" name="openFirst" ${b.openFirst?'checked':''}> Open first</label><label class="check-card"><input type="checkbox" name="missing" ${b.missing?'checked':''}> Missing</label><label class="check-card"><input type="checkbox" name="damaged" ${b.damaged?'checked':''}> Damaged</label></div>
+      <div class="grid-2"><label class="check-card"><input type="checkbox" name="fragile" ${b.fragile?'checked':''}> Fragile</label><label class="check-card"><input type="checkbox" name="openFirst" ${b.openFirst?'checked':''}> Open first</label><label class="check-card"><input type="checkbox" name="pinned" ${b.pinned?'checked':''}> Pin / important</label><label class="check-card"><input type="checkbox" name="missing" ${b.missing?'checked':''}> Missing</label><label class="check-card"><input type="checkbox" name="damaged" ${b.damaged?'checked':''}> Damaged</label></div>
       <div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-box" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save box</button></div>
     </form>`);
   }
 
   function openItemForm(id,opts={}){
     const forcedBoxId=opts.boxId||'';
-    const i=state.items.find(x=>x.id===id)||{name:'',quantity:1,category:'',roomId:'',destinationRoomId:'',boxId:forcedBoxId,status:forcedBoxId?'packed':'loose',decision:'',tags:'',notes:'',fragile:false,essential:false,doNotPack:false,sentimental:false,value:'',photoRef:'',condition:'',brand:'',model:'',serial:'',width:'',height:'',depth:'',saleStatus:'',soldPrice:'',donationOrg:'',partsFor:'',reassemblyNotes:''};
+    const i=state.items.find(x=>x.id===id)||{name:'',quantity:1,category:'',roomId:'',destinationRoomId:'',boxId:forcedBoxId,status:forcedBoxId?'packed':'loose',decision:'',tags:'',notes:'',fragile:false,essential:false,doNotPack:false,sentimental:false,pinned:false,value:'',photoRef:'',condition:'',brand:'',model:'',serial:'',width:'',height:'',depth:'',saleStatus:'',soldPrice:'',donationOrg:'',partsFor:'',reassemblyNotes:''};
+    const itemCategories=uniqueOptions(BUILTIN_ITEM_CATEGORIES,state.settings.customItemCategories,[i.category]);
     const preview=i.photoRef?`<img class="photo-preview" data-media="${esc(i.photoRef)}" alt="Item photo">`:i.legacyPhoto?`<img class="photo-preview" src="${i.legacyPhoto}" alt="Item photo">`:'';
     openSheet(id?'Edit item':opts.continuous?'Quick Pack · Add item':'Add item',`<form class="form" id="item-form" data-id="${id||''}" data-continuous="${opts.continuous?'1':'0'}">
       <div class="grid-2"><div class="field"><label>Item name</label><input required name="name" maxlength="90" value="${esc(i.name)}" placeholder="Blender"></div><div class="field"><label>Quantity</label><input type="number" min="1" max="999" step="1" name="quantity" value="${Number(i.quantity)||1}"></div></div>
-      <div class="grid-2"><div class="field"><label>Category</label><input name="category" maxlength="50" value="${esc(i.category||'')}" placeholder="Kitchen"></div><div class="field"><label>Decision</label><select name="decision"><option value="">Undecided</option>${['keep','donate','sell','trash'].map(x=>`<option value="${x}" ${i.decision===x?'selected':''}>${x[0].toUpperCase()+x.slice(1)}</option>`).join('')}</select></div></div>
+      <div class="grid-2"><div class="field"><label>Category</label><input name="category" list="item-category-list" maxlength="50" value="${esc(i.category||'')}" placeholder="Choose or type your own"><datalist id="item-category-list">${itemCategories.map(x=>`<option value="${esc(x)}"></option>`).join('')}</datalist></div><div class="field"><label>Decision</label><select name="decision"><option value="">Undecided</option>${['keep','donate','sell','trash'].map(x=>`<option value="${x}" ${i.decision===x?'selected':''}>${x[0].toUpperCase()+x.slice(1)}</option>`).join('')}</select></div></div>
       <div class="grid-2"><div class="field"><label>Current room</label><select name="roomId"><option value="">No room</option>${state.rooms.map(r=>`<option value="${r.id}" ${i.roomId===r.id?'selected':''}>${esc(r.name)}</option>`).join('')}</select></div><div class="field"><label>Destination room</label><select name="destinationRoomId"><option value="">Same / not set</option>${state.rooms.map(r=>`<option value="${r.id}" ${i.destinationRoomId===r.id?'selected':''}>${esc(r.destination||r.name)}</option>`).join('')}</select></div></div>
       <div class="field"><label>Packed in</label><select name="boxId"><option value="">Loose / no box</option>${state.boxes.map(b=>`<option value="${b.id}" ${i.boxId===b.id?'selected':''}>${esc(b.code)} · ${esc(b.name)}</option>`).join('')}</select></div>
       <div class="grid-2"><div class="field"><label>Condition</label><select name="condition"><option value="">Not set</option>${['New','Excellent','Good','Fair','Poor','Needs repair'].map(x=>`<option ${i.condition===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Estimated value</label><input type="number" min="0" step="0.01" name="value" value="${esc(i.value||'')}"></div></div>
       <div class="field"><label>Tags</label><input name="tags" maxlength="160" value="${esc(i.tags||'')}" placeholder="winter, documents, favorite"></div>
       <div class="field"><label>Photo</label>${preview}<input type="file" id="item-photo" accept="image/*" capture="environment"><div class="tiny">Photos are compressed and stored separately for smoother performance.</div></div>
       <div class="field"><label>Notes</label><textarea name="notes" maxlength="700">${esc(i.notes||'')}</textarea></div>
-      <div class="grid-2"><label class="check-card"><input type="checkbox" name="fragile" ${i.fragile?'checked':''}> Fragile</label><label class="check-card"><input type="checkbox" name="essential" ${i.essential?'checked':''}> Essential / first night</label><label class="check-card"><input type="checkbox" name="doNotPack" ${i.doNotPack?'checked':''}> Do not pack</label><label class="check-card"><input type="checkbox" name="sentimental" ${i.sentimental?'checked':''}> Memory / sentimental</label></div>
+      <div class="grid-2"><label class="check-card"><input type="checkbox" name="fragile" ${i.fragile?'checked':''}> Fragile</label><label class="check-card"><input type="checkbox" name="essential" ${i.essential?'checked':''}> Essential / first night</label><label class="check-card"><input type="checkbox" name="doNotPack" ${i.doNotPack?'checked':''}> Do not pack</label><label class="check-card"><input type="checkbox" name="sentimental" ${i.sentimental?'checked':''}> Memory / sentimental</label><label class="check-card"><input type="checkbox" name="pinned" ${i.pinned?'checked':''}> Pin / important</label></div>
       <details class="details-card"><summary>More details</summary><div class="form details-body">
         <div class="grid-3"><div class="field"><label>Brand</label><input name="brand" maxlength="50" value="${esc(i.brand||'')}"></div><div class="field"><label>Model</label><input name="model" maxlength="50" value="${esc(i.model||'')}"></div><div class="field"><label>Serial no.</label><input name="serial" maxlength="70" value="${esc(i.serial||'')}"></div></div>
         <div class="grid-3"><div class="field"><label>Width</label><input type="number" min="0" step="0.1" name="width" value="${esc(i.width||'')}"></div><div class="field"><label>Height</label><input type="number" min="0" step="0.1" name="height" value="${esc(i.height||'')}"></div><div class="field"><label>Depth</label><input type="number" min="0" step="0.1" name="depth" value="${esc(i.depth||'')}"></div></div>
@@ -842,16 +1017,20 @@
   }
 
   function openTaskForm(id){
-    const t=state.tasks.find(x=>x.id===id)||{title:'',due:'',category:'Packing',notes:'',done:false,priority:'normal'};
-    openSheet(id?'Edit task':'Add task',`<form class="form" id="task-form" data-id="${id||''}"><div class="field"><label>Task</label><input required name="title" maxlength="110" value="${esc(t.title)}" placeholder="Book moving truck"></div><div class="grid-3"><div class="field"><label>Due date</label><input type="date" name="due" value="${esc(t.due||'')}"></div><div class="field"><label>Category</label><select name="category">${['Plan & Notify','Declutter','Packing','Move Day','After Move','Admin','Other'].map(x=>`<option ${t.category===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Priority</label><select name="priority">${['normal','high','low'].map(x=>`<option value="${x}" ${t.priority===x?'selected':''}>${x[0].toUpperCase()+x.slice(1)}</option>`).join('')}</select></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="500">${esc(t.notes||'')}</textarea></div><label class="check-card"><input type="checkbox" name="done" ${t.done?'checked':''}> Completed</label><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-task" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save task</button></div></form>`);
+    const t=state.tasks.find(x=>x.id===id)||{title:'',due:'',category:'',notes:'',done:false,priority:'normal'};
+    const taskCategories=uniqueOptions(BUILTIN_TASK_CATEGORIES,state.settings.customTaskCategories,[t.category]);
+    openSheet(id?'Edit task':'Add task',`<form class="form" id="task-form" data-id="${id||''}"><div class="field"><label>Task</label><input required name="title" maxlength="110" value="${esc(t.title)}" placeholder="Book moving truck"></div><div class="grid-3"><div class="field"><label>Due date</label><input type="date" name="due" value="${esc(t.due||'')}"></div><div class="field"><label>Category</label><select name="category"><option value="">No category</option>${taskCategories.map(x=>`<option ${t.category===x?'selected':''}>${esc(x)}</option>`).join('')}</select></div><div class="field"><label>Priority</label><select name="priority">${['normal','high','low'].map(x=>`<option value="${x}" ${t.priority===x?'selected':''}>${x[0].toUpperCase()+x.slice(1)}</option>`).join('')}</select></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="500">${esc(t.notes||'')}</textarea></div><label class="check-card"><input type="checkbox" name="done" ${t.done?'checked':''}> Completed</label><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-task" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save task</button></div></form>`);
   }
 
-  function openExpenseForm(){
-    openSheet('Add expense',`<form class="form" id="expense-form"><div class="field"><label>Expense</label><input required name="title" maxlength="90" placeholder="Moving truck"></div><div class="grid-2"><div class="field"><label>Amount</label><input required type="number" min="0" step="0.01" name="amount" placeholder="0"></div><div class="field"><label>Category</label><select name="category">${['Movers','Packing Supplies','Storage','Cleaning','Travel','Deposits','Utilities','Furniture','Repairs','Food','Other'].map(x=>`<option>${x}</option>`).join('')}</select></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="400"></textarea></div><div class="form-actions"><button type="button" class="soft-btn" data-action="close-modal">Cancel</button><button class="primary-btn" type="submit">Save expense</button></div></form>`);
+  function openExpenseForm(id){
+    const x=state.expenses.find(e=>e.id===id)||{title:'',amount:'',category:'',notes:'',at:nowISO()};
+    const categories=uniqueOptions(BUILTIN_EXPENSE_CATEGORIES,state.settings.customExpenseCategories,[x.category]);
+    openSheet(id?'Edit expense':'Add expense',`<form class="form" id="expense-form" data-id="${id||''}"><div class="field"><label>Expense</label><input required name="title" maxlength="90" value="${esc(x.title||'')}" placeholder="Moving truck"></div><div class="grid-2"><div class="field"><label>Amount</label><input required type="number" min="0" step="0.01" name="amount" value="${Number(x.amount)||''}" placeholder="0"></div><div class="field"><label>Category</label><select name="category"><option value="">No category</option>${categories.map(c=>`<option ${x.category===c?'selected':''}>${esc(c)}</option>`).join('')}</select></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="400">${esc(x.notes||'')}</textarea></div><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-expense" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save expense</button></div></form>`);
   }
 
-  function openSupplyForm(){
-    openSheet('Add packing supply',`<form class="form" id="supply-form"><div class="field"><label>Supply</label><input required name="name" maxlength="80" placeholder="Packing tape"></div><div class="grid-2"><div class="field"><label>Quantity needed</label><input name="qty" type="number" min="0" step="1" value="1"></div><div class="field"><label>Unit</label><input name="unit" maxlength="20" placeholder="rolls"></div></div><div class="field"><label>Estimated cost</label><input name="cost" type="number" min="0" step="0.01"></div><div class="form-actions"><button type="button" class="soft-btn" data-action="close-modal">Cancel</button><button class="primary-btn" type="submit">Save supply</button></div></form>`);
+  function openSupplyForm(id){
+    const x=state.supplies.find(e=>e.id===id)||{name:'',qty:1,unit:'',cost:'',bought:false};
+    openSheet(id?'Edit packing supply':'Add packing supply',`<form class="form" id="supply-form" data-id="${id||''}"><div class="field"><label>Supply</label><input required name="name" maxlength="80" value="${esc(x.name||'')}" placeholder="Packing tape"></div><div class="grid-2"><div class="field"><label>Quantity needed</label><input name="qty" type="number" min="0" step="1" value="${Number(x.qty)||1}"></div><div class="field"><label>Unit</label><input name="unit" maxlength="20" value="${esc(x.unit||'')}" placeholder="rolls"></div></div><div class="field"><label>Estimated cost</label><input name="cost" type="number" min="0" step="0.01" value="${Number(x.cost)||''}"></div><label class="check-card"><input type="checkbox" name="bought" ${x.bought?'checked':''}> Already bought</label><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-supply" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save supply</button></div></form>`);
   }
 
   function openUtilityForm(id){
@@ -861,17 +1040,41 @@
 
   function openAddressForm(id){
     const a=state.addressChanges.find(x=>x.id===id)||{label:'',category:'Bank / Finance',status:'not-started',notes:''};
-    openSheet(id?'Edit address update':'Add address update',`<form class="form" id="address-form" data-id="${id||''}"><div class="field"><label>Organization / person</label><input required name="label" maxlength="90" value="${esc(a.label)}" placeholder="BPI / Employer / Insurance"></div><div class="grid-2"><div class="field"><label>Category</label><select name="category">${['Bank / Finance','Employer','Government','Insurance','Utilities','Shopping / Delivery','Subscriptions','School','Healthcare','Friends / Family','Other'].map(x=>`<option ${a.category===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Status</label><select name="status">${[['not-started','Not started'],['requested','Requested'],['confirmed','Confirmed']].map(([v,l])=>`<option value="${v}" ${a.status===v?'selected':''}>${l}</option>`).join('')}</select></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="400">${esc(a.notes||'')}</textarea></div><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-address-change" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save</button></div></form>`);
+    openSheet(id?'Edit address update':'Add address update',`<form class="form" id="address-form" data-id="${id||''}"><div class="field"><label>Organization / person</label><input required name="label" maxlength="90" value="${esc(a.label)}" placeholder="BPI / Employer / Insurance"></div><div class="grid-2"><div class="field"><label>Category</label><select name="category">${uniqueOptions(BUILTIN_ADDRESS_CATEGORIES,state.settings.customAddressCategories,[a.category]).map(x=>`<option ${a.category===x?'selected':''}>${esc(x)}</option>`).join('')}</select></div><div class="field"><label>Status</label><select name="status">${[['not-started','Not started'],['requested','Requested'],['confirmed','Confirmed']].map(([v,l])=>`<option value="${v}" ${a.status===v?'selected':''}>${l}</option>`).join('')}</select></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="400">${esc(a.notes||'')}</textarea></div><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-address-change" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save</button></div></form>`);
   }
 
   function openDocumentForm(id){
     const d=state.documents.find(x=>x.id===id)||{title:'',category:'Moving contract',reference:'',due:'',notes:''};
-    openSheet(id?'Edit document':'Add document / reference',`<form class="form" id="document-form" data-id="${id||''}"><div class="field"><label>Title</label><input required name="title" maxlength="100" value="${esc(d.title)}" placeholder="Condo move-in permit"></div><div class="grid-2"><div class="field"><label>Category</label><select name="category">${['Moving contract','Permit / building','Lease / property','Insurance','Utility confirmation','Receipt reference','School / medical','Other'].map(x=>`<option ${d.category===x?'selected':''}>${x}</option>`).join('')}</select></div><div class="field"><label>Due / expiry date</label><input type="date" name="due" value="${esc(d.due||'')}"></div></div><div class="field"><label>Reference number / link note</label><input name="reference" maxlength="160" value="${esc(d.reference||'')}"></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="600">${esc(d.notes||'')}</textarea></div><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-document" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save</button></div></form>`);
+    openSheet(id?'Edit document':'Add document / reference',`<form class="form" id="document-form" data-id="${id||''}"><div class="field"><label>Title</label><input required name="title" maxlength="100" value="${esc(d.title)}" placeholder="Condo move-in permit"></div><div class="grid-2"><div class="field"><label>Category</label><select name="category">${uniqueOptions(BUILTIN_DOCUMENT_CATEGORIES,state.settings.customDocumentCategories,[d.category]).map(x=>`<option ${d.category===x?'selected':''}>${esc(x)}</option>`).join('')}</select></div><div class="field"><label>Due / expiry date</label><input type="date" name="due" value="${esc(d.due||'')}"></div></div><div class="field"><label>Reference number / link note</label><input name="reference" maxlength="160" value="${esc(d.reference||'')}"></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="600">${esc(d.notes||'')}</textarea></div><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-document" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save</button></div></form>`);
   }
 
   function openContactForm(id){
     const c=state.contacts.find(x=>x.id===id)||{name:'',role:'',phone:'',email:'',notes:''};
     openSheet(id?'Edit contact':'Add contact',`<form class="form" id="contact-form" data-id="${id||''}"><div class="field"><label>Name / company</label><input required name="name" maxlength="90" value="${esc(c.name)}" placeholder="Moving company"></div><div class="field"><label>Role</label><input name="role" maxlength="70" value="${esc(c.role||'')}" placeholder="Mover / building admin / cleaner"></div><div class="grid-2"><div class="field"><label>Phone</label><input name="phone" inputmode="tel" maxlength="40" value="${esc(c.phone||'')}"></div><div class="field"><label>Email</label><input type="email" name="email" maxlength="100" value="${esc(c.email||'')}"></div></div><div class="field"><label>Notes</label><textarea name="notes" maxlength="500">${esc(c.notes||'')}</textarea></div><div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-contact" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save</button></div></form>`);
+  }
+
+  function openNoteForm(id){
+    const n=state.notes.find(x=>x.id===id)||{title:'',body:'',roomId:'',pinned:false};
+    openSheet(id?'Edit note':'Add move note',`<form class="form" id="note-form" data-id="${id||''}">
+      <div class="field"><label>Title</label><input required name="title" maxlength="90" value="${esc(n.title||'')}" placeholder="Bedroom measurements"></div>
+      <div class="field"><label>Room (optional)</label><select name="roomId"><option value="">General</option>${state.rooms.map(r=>`<option value="${r.id}" ${n.roomId===r.id?'selected':''}>${esc(r.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Note</label><textarea required name="body" maxlength="3000" placeholder="Measurements, instructions, reminders, ideas…">${esc(n.body||'')}</textarea></div>
+      <label class="check-card"><input type="checkbox" name="pinned" ${n.pinned?'checked':''}> Pin this note near the top</label>
+      <div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-note" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save note</button></div>
+    </form>`);
+  }
+
+  function openCustomOptionForm(kind){
+    const meta={
+      item:{title:'Add item category',label:'Category name',placeholder:'Kitchen appliances'},
+      box:{title:'Add container type',label:'Container type',placeholder:'Wardrobe box'},
+      task:{title:'Add task category',label:'Category name',placeholder:'Building / permits'},
+      expense:{title:'Add expense category',label:'Category name',placeholder:'Pet moving costs'},
+      document:{title:'Add document category',label:'Category name',placeholder:'Building clearance'},
+      address:{title:'Add address-change category',label:'Category name',placeholder:'Memberships'}
+    }[kind];
+    if(!meta)return;
+    openSheet(meta.title,`<form class="form" id="custom-option-form" data-kind="${kind}"><div class="field"><label>${meta.label}</label><input required name="value" maxlength="50" placeholder="${meta.placeholder}"></div><div class="form-actions"><button type="button" class="soft-btn" data-action="close-modal">Cancel</button><button class="primary-btn" type="submit">Add</button></div></form>`);
   }
 
   function openBoxDetail(id){
@@ -949,8 +1152,9 @@
     if(!incoming?.project||!Array.isArray(incoming.rooms)||!Array.isArray(incoming.boxes)||!Array.isArray(incoming.items)) throw new Error('Invalid backup');
     incoming=migrateState(incoming); incoming.hasOnboarded=true; incoming.ui={...DEFAULT.ui,...incoming.ui,tool:'backup'};
     const media=data?.media||{};
+    await clearAllMedia();
     for(const [id,url] of Object.entries(media)){ try{ await mediaPut(await dataURLToBlob(url),id); }catch(_){} }
-    state=incoming; saveState(true); render(); toast('Backup restored');
+    state=incoming; derivedDirty=true; saveState(true); render(); toast('Backup restored');
   }
 
   async function clearAllMedia(){
@@ -963,14 +1167,14 @@
 
   function exportCSV(){
     rebuildDerived();
-    const head=['Item','Quantity','Category','Decision','Current Room','Destination Room','Box Code','Box','Status','Fragile','Essential','Do Not Pack','Condition','Brand','Model','Serial','Value','Sale Status','Sold Price','Donation Destination','Tags','Notes','Parts For','Reassembly Notes'];
-    const rows=state.items.map(i=>{const b=boxById(i.boxId),r=roomById(i.roomId),dr=roomById(i.destinationRoomId);return [i.name,i.quantity,i.category,i.decision,r?.name||'',dr?.name||'',b?.code||'',b?.name||'',i.status,i.fragile?'Yes':'No',i.essential?'Yes':'No',i.doNotPack?'Yes':'No',i.condition,i.brand,i.model,i.serial,i.value,i.saleStatus,i.soldPrice,i.donationOrg,i.tags,i.notes,i.partsFor,i.reassemblyNotes];});
+    const head=['Item','Quantity','Category','Decision','Current Room','Destination Room','Box Code','Box','Status','Pinned','Fragile','Essential','Do Not Pack','Condition','Brand','Model','Serial','Width','Height','Depth','Value','Sale Status','Sold Price','Donation Destination','Tags','Notes','Parts For','Reassembly Notes'];
+    const rows=state.items.map(i=>{const b=boxById(i.boxId),r=roomById(i.roomId),dr=roomById(i.destinationRoomId);return [i.name,i.quantity,i.category,i.decision,r?.name||'',dr?.name||'',b?.code||'',b?.name||'',i.status,i.pinned?'Yes':'No',i.fragile?'Yes':'No',i.essential?'Yes':'No',i.doNotPack?'Yes':'No',i.condition,i.brand,i.model,i.serial,i.width,i.height,i.depth,i.value,i.saleStatus,i.soldPrice,i.donationOrg,i.tags,i.notes,i.partsFor,i.reassemblyNotes];});
     download(`hako-inventory-${todayISO()}.csv`,[head,...rows].map(r=>r.map(csvCell).join(',')).join('\n'),'text/csv');
   }
 
   function moveSummaryText(){
     const d=daysLeft();
-    return `Hako — ${state.project.name}\nMove date: ${state.project.moveDate?fmtDate(state.project.moveDate):'Not set'}${d!==null?` (${d>=0?d+' days left':Math.abs(d)+' days ago'})`:''}\nMove readiness: ${readiness()}%\nPacked: ${packPercent()}%\nDecluttered: ${declutterPercent()}%\nUnpacked: ${unpackPercent()}%\nRooms: ${state.rooms.length}\nBoxes: ${state.boxes.length}\nItems: ${state.items.length}\nOpen tasks: ${state.tasks.filter(t=>!t.done).length}\nOverdue tasks: ${overdueTasks().length}\nMoving spend: ${money(expenseTotal())}\nSelling proceeds: ${money(soldProceeds())}`;
+    return `Hako — ${state.project.name||'Your move'}\nMove date: ${state.project.moveDate?fmtDate(state.project.moveDate):'Not set'}${d!==null?` (${d>=0?d+' days left':Math.abs(d)+' days ago'})`:''}\nMove readiness: ${readiness()}%\nPacked: ${packPercent()}%\nDecluttered: ${declutterPercent()}%\nUnpacked: ${unpackPercent()}%\nRooms: ${state.rooms.length}\nBoxes: ${state.boxes.length}\nItems: ${state.items.length}\nOpen tasks: ${state.tasks.filter(t=>!t.done).length}\nOverdue tasks: ${overdueTasks().length}\nMoving spend: ${money(expenseTotal())}\nSelling proceeds: ${money(soldProceeds())}`;
   }
 
   function generateChecklist(){
@@ -1078,14 +1282,14 @@
   document.addEventListener('input',e=>{
     if(e.target.id==='find-input'){
       state.ui.findQuery=e.target.value;
-      saveState(false);
-      updateFindResults();
+      clearTimeout(searchRenderTimer);
+      searchRenderTimer=setTimeout(updateFindResults,70);
     }
   });
 
   document.addEventListener('change',e=>{
     const setting=e.target.dataset.setting;
-    if(setting){ state.settings[setting]=!!e.target.checked; commit(`Updated ${setting} setting`); return; }
+    if(setting){ state.settings[setting]=!!e.target.checked; saveState(true); render(); return; }
     if(e.target.id==='import-file'){
       const file=e.target.files?.[0]; if(!file)return;
       const fr=new FileReader();
@@ -1100,7 +1304,7 @@
 
     if(f.id==='project-form'){
       state.profile.name=String(fd.get('name')||'').trim();
-      Object.assign(state.project,{projectName:undefined,name:String(fd.get('projectName')||'My Move').trim()||'My Move',moveType:fd.get('moveType')||'Home move',moveDate:fd.get('moveDate')||'',householdSize:Math.max(1,Number(fd.get('householdSize'))||1),homeType:fd.get('homeType')||'',from:String(fd.get('from')||'').trim(),to:String(fd.get('to')||'').trim(),currency:fd.get('currency')||'PHP',units:fd.get('units')||'cm',budget:Number(fd.get('budget')||0)});
+      Object.assign(state.project,{projectName:undefined,name:String(fd.get('projectName')||'').trim(),moveType:fd.get('moveType')||'Home move',moveDate:fd.get('moveDate')||'',householdSize:Math.max(1,Number(fd.get('householdSize'))||1),homeType:fd.get('homeType')||'',from:String(fd.get('from')||'').trim(),to:String(fd.get('to')||'').trim(),currency:fd.get('currency')||initialCurrency,units:fd.get('units')||initialUnits,budget:Number(fd.get('budget')||0)});
       delete state.project.projectName;
       closeModal(); commit('Updated move setup'); return;
     }
@@ -1114,10 +1318,13 @@
 
     if(f.id==='box-form'){
       const id=f.dataset.id,roomId=fd.get('roomId')||'';
-      const obj={id:id||uid('box'),code:id?(state.boxes.find(x=>x.id===id)?.code||nextBoxCode(roomId)):nextBoxCode(roomId),name:String(fd.get('name')).trim(),roomId,type:fd.get('type')||'Box',status:fd.get('status')||'empty',capacity:clamp(fd.get('capacity'),0,100),weight:Math.max(0,Number(fd.get('weight'))||0),priority:fd.get('priority')||'normal',vehicle:String(fd.get('vehicle')||'').trim(),loadOrder:Math.max(0,Number(fd.get('loadOrder'))||0),notes:String(fd.get('notes')||'').trim(),fragile:fd.get('fragile')==='on',openFirst:fd.get('openFirst')==='on',missing:fd.get('missing')==='on',damaged:fd.get('damaged')==='on'};
+      const obj={id:id||uid('box'),code:id?(state.boxes.find(x=>x.id===id)?.code||nextBoxCode(roomId)):nextBoxCode(roomId),name:String(fd.get('name')).trim(),roomId,type:fd.get('type')||'Box',status:fd.get('status')||'empty',capacity:clamp(fd.get('capacity'),0,100),weight:Math.max(0,Number(fd.get('weight'))||0),priority:fd.get('priority')||'normal',labelColor:fd.get('labelColor')||'pink',vehicle:String(fd.get('vehicle')||'').trim(),loadOrder:Math.max(0,Number(fd.get('loadOrder'))||0),notes:String(fd.get('notes')||'').trim(),fragile:fd.get('fragile')==='on',openFirst:fd.get('openFirst')==='on',pinned:fd.get('pinned')==='on',missing:fd.get('missing')==='on',damaged:fd.get('damaged')==='on'};
       if(obj.openFirst&&obj.priority==='normal')obj.priority='first';
+      const childItems=state.items.filter(i=>i.boxId===obj.id);
+      if(childItems.length&&obj.status==='empty')obj.status='packing';
       if(id) Object.assign(state.boxes.find(x=>x.id===id),obj); else state.boxes.push(obj);
-      if(['loaded','unloaded','unpacked'].includes(obj.status)) state.items.filter(i=>i.boxId===obj.id).forEach(i=>i.status=obj.status==='unpacked'?'unpacked':obj.status);
+      const childStatus=obj.status==='unpacked'?'unpacked':obj.status==='unloaded'?'unloaded':obj.status==='loaded'?'loaded':'packed';
+      childItems.forEach(i=>i.status=childStatus);
       closeModal(); commit(`${id?'Updated':'Added'} box ${obj.code}`); return;
     }
 
@@ -1136,7 +1343,7 @@
       const doNotPack=fd.get('doNotPack')==='on';
       if(doNotPack) boxId='';
       if(boxId&&!roomId){ const b=state.boxes.find(x=>x.id===boxId); if(b)roomId=b.roomId||''; }
-      const obj={id:id||uid('item'),name:String(fd.get('name')).trim(),quantity:Math.max(1,Number(fd.get('quantity'))||1),category:String(fd.get('category')||'').trim(),roomId,destinationRoomId:fd.get('destinationRoomId')||'',boxId,status:boxId?'packed':'loose',decision:fd.get('decision')||'',tags:String(fd.get('tags')||'').trim(),value:Number(fd.get('value')||0)||'',notes:String(fd.get('notes')||'').trim(),fragile:fd.get('fragile')==='on',essential:fd.get('essential')==='on',doNotPack,sentimental:fd.get('sentimental')==='on',photoRef,condition:fd.get('condition')||'',brand:String(fd.get('brand')||'').trim(),model:String(fd.get('model')||'').trim(),serial:String(fd.get('serial')||'').trim(),width:Number(fd.get('width')||0)||'',height:Number(fd.get('height')||0)||'',depth:Number(fd.get('depth')||0)||'',partsFor:String(fd.get('partsFor')||'').trim(),reassemblyNotes:String(fd.get('reassemblyNotes')||'').trim(),saleStatus:fd.get('saleStatus')||'',soldPrice:Number(fd.get('soldPrice')||0)||0,donationOrg:String(fd.get('donationOrg')||'').trim()};
+      const obj={id:id||uid('item'),name:String(fd.get('name')).trim(),quantity:Math.max(1,Number(fd.get('quantity'))||1),category:String(fd.get('category')||'').trim(),roomId,destinationRoomId:fd.get('destinationRoomId')||'',boxId,status:boxId?'packed':'loose',decision:fd.get('decision')||'',tags:String(fd.get('tags')||'').trim(),value:Number(fd.get('value')||0)||'',notes:String(fd.get('notes')||'').trim(),fragile:fd.get('fragile')==='on',essential:fd.get('essential')==='on',doNotPack,sentimental:fd.get('sentimental')==='on',pinned:fd.get('pinned')==='on',photoRef,condition:fd.get('condition')||'',brand:String(fd.get('brand')||'').trim(),model:String(fd.get('model')||'').trim(),serial:String(fd.get('serial')||'').trim(),width:Number(fd.get('width')||0)||'',height:Number(fd.get('height')||0)||'',depth:Number(fd.get('depth')||0)||'',partsFor:String(fd.get('partsFor')||'').trim(),reassemblyNotes:String(fd.get('reassemblyNotes')||'').trim(),saleStatus:fd.get('saleStatus')||'',soldPrice:Number(fd.get('soldPrice')||0)||0,donationOrg:String(fd.get('donationOrg')||'').trim()};
       if(old)Object.assign(old,obj);else state.items.push(obj);
       if(boxId){ const b=state.boxes.find(x=>x.id===boxId); if(b&&b.status==='empty')b.status='packing'; }
       const continuous=f.dataset.continuous==='1'&&!id;
@@ -1146,19 +1353,21 @@
     }
 
     if(f.id==='task-form'){
-      const id=f.dataset.id,obj={id:id||uid('task'),title:String(fd.get('title')).trim(),due:fd.get('due')||'',category:fd.get('category')||'Other',priority:fd.get('priority')||'normal',notes:String(fd.get('notes')||'').trim(),done:fd.get('done')==='on',templateKey:id?(state.tasks.find(x=>x.id===id)?.templateKey||''):''};
+      const id=f.dataset.id,obj={id:id||uid('task'),title:String(fd.get('title')).trim(),due:fd.get('due')||'',category:fd.get('category')||'',priority:fd.get('priority')||'normal',notes:String(fd.get('notes')||'').trim(),done:fd.get('done')==='on',templateKey:id?(state.tasks.find(x=>x.id===id)?.templateKey||''):''};
       if(id)Object.assign(state.tasks.find(x=>x.id===id),obj);else state.tasks.push(obj);
       closeModal();commit(`${id?'Updated':'Added'} task “${obj.title}”`);return;
     }
 
     if(f.id==='expense-form'){
-      const obj={id:uid('exp'),title:String(fd.get('title')).trim(),amount:Number(fd.get('amount')||0),category:fd.get('category')||'Other',notes:String(fd.get('notes')||'').trim(),at:nowISO()};
-      state.expenses.push(obj);closeModal();commit(`Added expense “${obj.title}”`);return;
+      const id=f.dataset.id,old=id?state.expenses.find(x=>x.id===id):null;
+      const obj={id:id||uid('exp'),title:String(fd.get('title')).trim(),amount:Math.max(0,Number(fd.get('amount')||0)),category:fd.get('category')||'',notes:String(fd.get('notes')||'').trim(),at:old?.at||nowISO()};
+      if(old)Object.assign(old,obj);else state.expenses.push(obj);closeModal();commit(`${id?'Updated':'Added'} expense “${obj.title}”`);return;
     }
 
     if(f.id==='supply-form'){
-      const obj={id:uid('sup'),name:String(fd.get('name')).trim(),qty:Number(fd.get('qty')||1),unit:String(fd.get('unit')||'').trim(),cost:Number(fd.get('cost')||0),bought:false};
-      state.supplies.push(obj);closeModal();commit(`Added supply “${obj.name}”`);return;
+      const id=f.dataset.id,old=id?state.supplies.find(x=>x.id===id):null;
+      const obj={id:id||uid('sup'),name:String(fd.get('name')).trim(),qty:Math.max(0,Number(fd.get('qty')||1)),unit:String(fd.get('unit')||'').trim(),cost:Math.max(0,Number(fd.get('cost')||0)),bought:fd.get('bought')==='on'};
+      if(old)Object.assign(old,obj);else state.supplies.push(obj);closeModal();commit(`${id?'Updated':'Added'} supply “${obj.name}”`);return;
     }
 
     if(f.id==='utility-form'){
@@ -1181,6 +1390,22 @@
       if(id)Object.assign(state.contacts.find(x=>x.id===id),obj);else state.contacts.push(obj);closeModal();commit(`${id?'Updated':'Added'} contact “${obj.name}”`);return;
     }
 
+    if(f.id==='note-form'){
+      const id=f.dataset.id,old=id?state.notes.find(x=>x.id===id):null;
+      const obj={id:id||uid('note'),title:String(fd.get('title')||'').trim(),body:String(fd.get('body')||'').trim(),roomId:fd.get('roomId')||'',pinned:fd.get('pinned')==='on',createdAt:old?.createdAt||nowISO(),updatedAt:nowISO()};
+      if(old)Object.assign(old,obj);else state.notes.push(obj);
+      closeModal();commit(`${id?'Updated':'Added'} move note “${obj.title}”`);return;
+    }
+
+    if(f.id==='custom-option-form'){
+      const kind=f.dataset.kind,value=String(fd.get('value')||'').trim();
+      const key={item:'customItemCategories',box:'customBoxTypes',task:'customTaskCategories',expense:'customExpenseCategories',document:'customDocumentCategories',address:'customAddressCategories'}[kind];
+      if(!key||!value){toast('Enter a name first.');return;}
+      if(state.settings[key].some(x=>normalize(x)===normalize(value))){toast('That option already exists.');return;}
+      state.settings[key].push(value); state.settings[key]=state.settings[key].slice(0,40);
+      closeModal();saveState(true);render();toast('Custom option added');return;
+    }
+
     if(f.id==='scan-code-form'){
       const b=findBoxByCode(fd.get('code'));
       if(!b){toast('No Hako box found with that code.');return;}
@@ -1199,16 +1424,16 @@
 
   document.addEventListener('click',async e=>{
     const tab=e.target.closest('[data-tab]');
-    if(tab){state.ui.tab=tab.dataset.tab;state.ui.tool=null;state.ui.roomFilter=null;saveState(true);render();haptic();return;}
+    if(tab){state.ui.tab=tab.dataset.tab;state.ui.tool=null;state.ui.roomFilter=null;saveState(false);if($modal.innerHTML)closeModal();render();haptic();return;}
 
     const tool=e.target.closest('[data-tool]');
-    if(tool){state.ui.tool=tool.dataset.tool;saveState(true);render();haptic();return;}
+    if(tool){state.ui.tool=tool.dataset.tool;saveState(false);if($modal.innerHTML)closeModal();render();haptic();return;}
 
     const boxFilter=e.target.closest('[data-box-filter]');
     if(boxFilter){
       state.ui.boxFilter=boxFilter.dataset.boxFilter;
       if(state.ui.tool==='move-day'){state.ui.tool=null;state.ui.tab='boxes';}
-      saveState(true);render();return;
+      saveState(false);render();return;
     }
     const taskFilter=e.target.closest('[data-task-filter]');
     if(taskFilter){state.ui.taskFilter=taskFilter.dataset.taskFilter;saveState(false);render();return;}
@@ -1217,13 +1442,14 @@
     const packRoom=e.target.closest('[data-pack-room]');
     if(packRoom){state.ui.packRoomFilter=packRoom.dataset.packRoom;saveState(false);render();return;}
     const recent=e.target.closest('[data-recent-search]');
-    if(recent){state.ui.findQuery=recent.dataset.recentSearch;const input=document.getElementById('find-input');if(input)input.value=state.ui.findQuery;saveState(false);updateFindResults();return;}
+    if(recent){state.ui.findQuery=recent.dataset.recentSearch;const input=document.getElementById('find-input');if(input)input.value=state.ui.findQuery;updateFindResults();return;}
     const result=e.target.closest('[data-result-type]');
     if(result){
       recordSearch(state.ui.findQuery);
       if(result.dataset.resultType==='box')openBoxDetail(result.dataset.id);
       else if(result.dataset.resultType==='item')openItemForm(result.dataset.id);
       else if(result.dataset.resultType==='room')openRoomDetail(result.dataset.id);
+      else if(result.dataset.resultType==='note')openNoteForm(result.dataset.id);
       return;
     }
 
@@ -1231,17 +1457,21 @@
     const a=act.dataset.action,id=act.dataset.id,val=act.dataset.value;
 
     if(a==='close-modal'){
-      if(!e.target.closest('[data-sheet]')||act.closest('.sheet-head,.form-actions'))closeModal();
+      const insideSheet=e.target.closest('[data-sheet]');
+      const insideDrawer=e.target.closest('[data-drawer]');
+      if((!insideSheet&&!insideDrawer)||act.closest('.sheet-head,.form-actions,.drawer-head'))closeModal();
       return;
     }
     if(a==='start-setup'){state.hasOnboarded=true;saveState(true);render();setTimeout(()=>openSetup(true),25);return;}
-    if(a==='skip-setup'){state.hasOnboarded=true;commit('Started Hako');return;}
-    if(a==='back-tool'){state.ui.tool=null;saveState(true);render();return;}
+    if(a==='skip-setup'){state.hasOnboarded=true;saveState(true);render();return;}
+    if(a==='back-tool'){state.ui.tool=null;saveState(false);render();return;}
+    if(a==='open-menu'){openMenu();return;}
+    if(a==='recover-home'){state=migrateState(state);state.ui={...DEFAULT.ui,tab:'home'};derivedDirty=true;saveState(true);render();toast('Hako is ready');return;}
     if(a==='open-project'){openSetup(false);return;}
     if(a==='quick-add'){
       openSheet('Quick add',`<div class="tool-grid"><button class="tool-card" data-action="quick-pack-add"><span class="tool-icon">⚡</span><h3>Quick Pack</h3><p>Add multiple items continuously</p></button><button class="tool-card" data-action="add-box"><span class="tool-icon">📦</span><h3>Box</h3><p>Create a container</p></button><button class="tool-card" data-action="add-room"><span class="tool-icon">🏠</span><h3>Room</h3><p>Add a space</p></button><button class="tool-card" data-action="add-task"><span class="tool-icon">✓</span><h3>Task</h3><p>Add a checklist item</p></button><button class="tool-card" data-action="open-scan"><span class="tool-icon">▦</span><h3>Scan</h3><p>Find a labeled box</p></button><button class="tool-card" data-action="add-expense"><span class="tool-icon">₱</span><h3>Expense</h3><p>Track a moving cost</p></button></div>`,{focus:false});return;
     }
-    if(a==='open-tasks'){state.ui.tool='tasks';saveState(true);render();return;}
+    if(a==='open-tasks'){state.ui.tool='tasks';saveState(false);render();return;}
 
     if(a==='add-room'){openRoomForm();return;}
     if(a==='edit-room'){openRoomForm(id);return;}
@@ -1250,11 +1480,12 @@
       if(confirm('Delete this room? Boxes and items stay but become unassigned.')){
         state.boxes.forEach(b=>{if(b.roomId===id)b.roomId='';});
         state.items.forEach(i=>{if(i.roomId===id)i.roomId='';if(i.destinationRoomId===id)i.destinationRoomId='';});
+        state.notes.forEach(n=>{if(n.roomId===id)n.roomId='';});
         state.rooms=state.rooms.filter(r=>r.id!==id);closeModal();commit('Deleted room');
       }return;
     }
-    if(a==='filter-room'){state.ui.roomFilter=id;state.ui.tab='boxes';state.ui.tool=null;saveState(true);closeModal();render();return;}
-    if(a==='clear-room-filter'){state.ui.roomFilter=null;saveState(true);render();return;}
+    if(a==='filter-room'){state.ui.roomFilter=id;state.ui.tab='boxes';state.ui.tool=null;saveState(false);closeModal();render();return;}
+    if(a==='clear-room-filter'){state.ui.roomFilter=null;saveState(false);render();return;}
     if(a==='cycle-room-setup'){
       const r=state.rooms.find(x=>x.id===id); if(r){r.setupStatus=r.setupStatus==='done'?'not-started':r.setupStatus==='in-progress'?'done':'in-progress';commit(`Updated ${r.name} setup`);}return;
     }
@@ -1295,10 +1526,12 @@
     if(a==='generate-checklist'){generateChecklist();return;}
 
     if(a==='add-expense'){openExpenseForm();return;}
-    if(a==='delete-expense'){state.expenses=state.expenses.filter(x=>x.id!==id);commit('Deleted expense');return;}
+    if(a==='edit-expense'){openExpenseForm(id);return;}
+    if(a==='delete-expense'){state.expenses=state.expenses.filter(x=>x.id!==id);if($modal.innerHTML)closeModal();commit('Deleted expense');return;}
     if(a==='add-supply'){openSupplyForm();return;}
+    if(a==='edit-supply'){openSupplyForm(id);return;}
     if(a==='toggle-supply'){const s=state.supplies.find(x=>x.id===id);if(s){s.bought=!s.bought;commit(`${s.bought?'Bought':'Reopened'} supply “${s.name}”`);}return;}
-    if(a==='delete-supply'){state.supplies=state.supplies.filter(x=>x.id!==id);commit('Deleted supply');return;}
+    if(a==='delete-supply'){state.supplies=state.supplies.filter(x=>x.id!==id);if($modal.innerHTML)closeModal();commit('Deleted supply');return;}
 
     if(a==='add-utility'){openUtilityForm();return;}
     if(a==='edit-utility'){openUtilityForm(id);return;}
@@ -1311,6 +1544,18 @@
     if(a==='cycle-address-status'){const x=state.addressChanges.find(y=>y.id===id);if(x){x.status=x.status==='not-started'?'requested':x.status==='requested'?'confirmed':'not-started';commit(`Updated ${x.label}`);}return;}
     if(a==='generate-address-list'){generateAddressList();return;}
 
+    if(a==='add-note'){openNoteForm();return;}
+    if(a==='edit-note'){openNoteForm(id);return;}
+    if(a==='delete-note'){if(confirm('Delete this note?')){state.notes=state.notes.filter(x=>x.id!==id);closeModal();commit('Deleted move note');}return;}
+
+    if(a==='add-custom-option'){openCustomOptionForm(val);return;}
+    if(a==='remove-custom-option'){
+      const key={item:'customItemCategories',box:'customBoxTypes',task:'customTaskCategories',expense:'customExpenseCategories',document:'customDocumentCategories',address:'customAddressCategories'}[val];
+      const option=act.dataset.option||'';
+      if(key){state.settings[key]=state.settings[key].filter(x=>x!==option);saveState(true);render();toast('Custom option removed');}
+      return;
+    }
+
     if(a==='add-document'){openDocumentForm();return;}
     if(a==='edit-document'){openDocumentForm(id);return;}
     if(a==='delete-document'){state.documents=state.documents.filter(x=>x.id!==id);closeModal();commit('Deleted document record');return;}
@@ -1318,8 +1563,8 @@
     if(a==='edit-contact'){openContactForm(id);return;}
     if(a==='delete-contact'){state.contacts=state.contacts.filter(x=>x.id!==id);closeModal();commit('Deleted contact');return;}
 
-    if(a==='go-find'){state.ui.tab='find';state.ui.tool=null;saveState(true);render();return;}
-    if(a==='go-boxes'){state.ui.tab='boxes';state.ui.tool=null;saveState(true);render();return;}
+    if(a==='go-find'){state.ui.tab='find';state.ui.tool=null;saveState(false);if($modal.innerHTML)closeModal();render();return;}
+    if(a==='go-boxes'){state.ui.tab='boxes';state.ui.tool=null;saveState(false);if($modal.innerHTML)closeModal();render();return;}
     if(a==='clear-searches'){state.recentSearches=[];saveState(true);render();return;}
     if(a==='open-scan'){openScanSheet();return;}
     if(a==='start-camera-scan'){startCameraScan();return;}
@@ -1346,7 +1591,7 @@
     if(a==='reset-app'){
       if(confirm('Erase every Hako room, box, item, photo, task, expense and setting from this device? This cannot be undone.')){
         for(const k of [STORAGE_KEY,...LEGACY_KEYS]){try{localStorage.removeItem(k);}catch(_){}}
-        await clearAllMedia(); state=cloneDefault(); closeModal(); render();
+        await clearAllMedia(); state=cloneDefault(); derivedDirty=true; closeModal(); render();
       }return;
     }
   });
@@ -1355,7 +1600,7 @@
     const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     if(!SR){toast('Voice search is not supported on this browser.');return;}
     const rec=new SR();rec.lang=navigator.language||'en-US';rec.interimResults=false;rec.maxAlternatives=1;
-    rec.onresult=e=>{state.ui.findQuery=e.results[0][0].transcript;const input=document.getElementById('find-input');if(input)input.value=state.ui.findQuery;saveState(false);updateFindResults();};
+    rec.onresult=e=>{state.ui.findQuery=e.results[0][0].transcript;const input=document.getElementById('find-input');if(input)input.value=state.ui.findQuery;updateFindResults();};
     rec.onerror=()=>toast('Could not hear that. Try typing instead.');rec.start();
   }
 

@@ -1,6 +1,6 @@
-const CACHE = 'hako-shell-v2.0.0';
+const CACHE = 'hako-shell-v3.0.0';
 const APP_SHELL = [
-  './', './index.html', './style.css', './app.js', './manifest.json',
+  './', './index.html', './style.css?v=3.0.0', './app.js?v=3.0.0', './manifest.json',
   './icons/icon-48.png', './icons/icon-72.png', './icons/icon-96.png',
   './icons/icon-192.png', './icons/icon-512.png',
   './icons/maskable-192.png', './icons/maskable-512.png', './icons/apple-touch-icon.png'
