@@ -1,9 +1,9 @@
 (() => {
   'use strict';
 
-  const APP_VERSION = '3.0.0';
-  const STORAGE_KEY = 'hako.app.v3';
-  const LEGACY_KEYS = ['hako.app.v2','hako.app.v1'];
+  const APP_VERSION = '4.0.0';
+  const STORAGE_KEY = 'hako.app.v4';
+  const LEGACY_KEYS = ['hako.app.v3','hako.app.v2','hako.app.v1'];
   const DB_NAME = 'hako-media-v1';
   const DB_STORE = 'media';
   const VIEW_LIMIT = 160;
@@ -30,7 +30,7 @@
   const initialUnits = localeRegion==='US' ? 'in' : 'cm';
 
   const DEFAULT = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     hasOnboarded: false,
     profile: { name: '' },
     project: {
@@ -38,18 +38,18 @@
       moveType:'Home move', householdSize:1, homeType:'', budget:0, createdAt:nowISO()
     },
     rooms: [], boxes: [], items: [], tasks: [], expenses: [], supplies: [],
-    utilities: [], addressChanges: [], documents: [], contacts: [], packingSessions: [], notes: [],
+    utilities: [], addressChanges: [], documents: [], contacts: [], packingSessions: [], notes: [], archives: [],
     activity: [], recentSearches: [],
     settings: {
       accent:'pink', haptics:true, reduceEffects:false, compact:false,
-      showJourney:true, showHomeAlerts:true, showDeclutterHome:true, showRecentActivity:true,
+      showJourney:true, showHomeAlerts:true, showDeclutterHome:true, showRecentActivity:true, showSuggestionsHome:true,
       customItemCategories:[], customBoxTypes:[], customTaskCategories:[],
       customExpenseCategories:[], customDocumentCategories:[], customAddressCategories:[]
     },
     meta: { boxSeq:0, lastBackup:'' },
     ui: {
       tab:'home', tool:null, roomFilter:null, boxFilter:'all', taskFilter:'all', findQuery:'',
-      declutterFilter:'all', packRoomFilter:'all', reportRoomFilter:'all'
+      declutterFilter:'all', packRoomFilter:'all', reportRoomFilter:'all', loadingFilter:'all'
     }
   };
 
@@ -105,7 +105,7 @@
       meta:{...DEFAULT.meta,...(data.meta||{})},
       ui:{...DEFAULT.ui,...(data.ui||{})}
     };
-    for(const k of ['rooms','boxes','items','tasks','expenses','supplies','utilities','addressChanges','documents','contacts','packingSessions','notes','activity','recentSearches']){
+    for(const k of ['rooms','boxes','items','tasks','expenses','supplies','utilities','addressChanges','documents','contacts','packingSessions','notes','archives','activity','recentSearches']){
       if(!Array.isArray(out[k])) out[k]=[];
     }
     for(const k of ['customItemCategories','customBoxTypes','customTaskCategories','customExpenseCategories','customDocumentCategories','customAddressCategories']){
@@ -130,8 +130,12 @@
       b.pinned = !!b.pinned;
       b.labelColor ||= 'pink';
       if(!['pink','red','orange','yellow','green','blue','purple','gray'].includes(b.labelColor)) b.labelColor='pink';
+      b.storageUnit ||= '';
+      b.storageZone ||= '';
+      b.storageShelf ||= '';
       b.code ||= makeStableCode(out, b.roomId, idx+1);
     });
+    out.archives = (out.archives||[]).filter(Boolean).slice(0,12);
     out.meta.boxSeq = Math.max(seq, out.boxes.length);
     out.items.forEach(i=>{
       i.quantity = Math.max(1, Number(i.quantity)||1);
@@ -155,7 +159,7 @@
     });
     out.tasks.forEach(t=>{ t.priority ||= 'normal'; t.templateKey ||= ''; });
     out.notes.forEach(n=>{ n.title ||= ''; n.body ||= ''; n.roomId ||= ''; n.pinned=!!n.pinned; n.updatedAt ||= n.createdAt || nowISO(); });
-    out.schemaVersion = 3;
+    out.schemaVersion = 4;
     return out;
   }
 
@@ -375,7 +379,7 @@
     }
     for(const b of state.boxes){
       const r=roomsById.get(b.roomId);
-      searchIndex.push({type:'box',id:b.id,title:`${b.code} · ${b.name||'Untitled box'}`,emoji:b.pinned?'📌':'📦',sub:`${r?.name||'No room'} · ${(itemsByBox.get(b.id)||[]).length} items`,search:normalize([b.code,b.name,b.notes,b.type,b.vehicle,r?.name].join(' '))});
+      searchIndex.push({type:'box',id:b.id,title:`${b.code} · ${b.name||'Untitled box'}`,emoji:b.pinned?'📌':'📦',sub:`${r?.name||'No room'} · ${(itemsByBox.get(b.id)||[]).length} items`,search:normalize([b.code,b.name,b.notes,b.type,b.vehicle,b.storageUnit,b.storageZone,b.storageShelf,r?.name].join(' '))});
     }
     for(const r of state.rooms){
       searchIndex.push({type:'room',id:r.id,title:r.name,emoji:r.emoji||'🏠',sub:`${(itemsByRoom.get(r.id)||[]).length} items · ${(boxesByRoom.get(r.id)||[]).length} boxes`,search:normalize([r.name,r.destination,r.notes].join(' '))});
@@ -416,9 +420,12 @@
     return boxes.length ? Math.round(boxes.filter(b=>b.status==='unpacked').length/boxes.length*100) : 0;
   }
   function readiness(){
-    const setup=(state.project.moveDate?25:0)+(state.rooms.length?25:0)+(state.boxes.length?25:0)+(state.items.length?25:0);
+    const setup=(state.project.moveDate?18:0)+(state.rooms.length?12:0)+(state.boxes.length?12:0)+(state.items.length?12:0);
     const tasks=state.tasks.length?taskDone()/state.tasks.length*100:0;
-    return clamp(Math.round(packPercent()*.45+declutterPercent()*.15+tasks*.20+setup*.20),0,100);
+    const utilities=state.utilities.length?Math.round(state.utilities.filter(u=>u.newStatus==='connected'&&u.oldStatus==='disconnected').length/state.utilities.length*100):0;
+    const address=state.addressChanges.length?Math.round(state.addressChanges.filter(a=>a.status==='confirmed').length/state.addressChanges.length*100):0;
+    const roomSetup=state.rooms.length?Math.round(state.rooms.filter(r=>r.setupStatus==='done').length/state.rooms.length*100):0;
+    return clamp(Math.round(packPercent()*.32+declutterPercent()*.12+unpackPercent()*.08+tasks*.18+setup*.18+utilities*.06+address*.03+roomSetup*.03),0,100);
   }
   function journeyPhase(){
     const d=daysLeft(), packed=packPercent(), unpacked=unpackPercent();
@@ -482,7 +489,7 @@
   }
 
   function topbar(){
-    const toolTitle={tasks:'Checklist',declutter:'Declutter','pack-mode':'Pack Mode','move-day':'Move Day',unpacking:'Unpacking',essentials:'Essentials',notes:'Move Notes',expenses:'Budget & Expenses',supplies:'Packing Supplies',utilities:'Utilities','address-change':'Address Change',documents:'Documents',contacts:'Contacts','fit-check':'Will It Fit?',reports:'Reports',backup:'Backup & Export',settings:'Settings',about:'About Hako'}[state.ui.tool];
+    const toolTitle={tasks:'Checklist',declutter:'Declutter','pack-mode':'Pack Mode','move-day':'Move Day',loading:'Loading Plan',unpacking:'Unpacking',essentials:'Essentials',notes:'Move Notes',selling:'Selling Center',donations:'Donation Center',storage:'Storage',setup:'Arrival & Setup',expenses:'Budget & Expenses',supplies:'Packing Supplies',utilities:'Utilities','address-change':'Address Change',documents:'Documents',contacts:'Contacts','fit-check':'Will It Fit?',reports:'Reports',backup:'Backup & Export',settings:'Settings',about:'About Hako'}[state.ui.tool];
     const titles={home:'Hako',rooms:'Rooms',boxes:'Boxes',find:'Find My Stuff'};
     if(state.ui.tool) return `<header class="topbar"><button class="icon-btn" data-action="back-tool" aria-label="Back">‹</button><h1>${esc(toolTitle||'Hako')}</h1><button class="icon-btn" data-action="quick-add" aria-label="Quick add">＋</button></header>`;
     return `<header class="topbar"><button class="icon-btn" data-action="open-menu" aria-label="Open menu">☰</button><h1>${esc(titles[state.ui.tab]||'Hako')}</h1><button class="icon-btn" data-action="quick-add" aria-label="Quick add">＋</button></header>`;
@@ -529,6 +536,20 @@
     return alerts;
   }
 
+
+  function roomSetupPercent(){ return state.rooms.length ? Math.round(state.rooms.filter(r=>r.setupStatus==='done').length/state.rooms.length*100) : 0; }
+  function homeSuggestions(){
+    const tips=[];
+    if(!state.rooms.length) tips.push(['Add rooms','Start with Bedroom, Kitchen, Bathroom or your own custom spaces.','add-room']);
+    if(state.rooms.length && !state.boxes.length) tips.push(['Create your first box','Open a container and give it a stable label code.','add-box']);
+    if(state.boxes.length && !state.items.length) tips.push(['Start inventory','Add items to make “Where did I pack this?” truly useful.','add-item']);
+    if(state.items.filter(i=>i.partsFor||i.reassemblyNotes).length<1 && state.items.length>3) tips.push(['Capture reassembly notes','Add cable notes, screw-bag notes or parts links before dismantling furniture.','add-item']);
+    if(!state.boxes.some(b=>b.vehicle||b.loadOrder) && state.boxes.length>2) tips.push(['Plan your loading order','Use the Loading Plan to assign vehicles and loading order.','open-loading']);
+    if(state.items.some(i=>i.decision==='sell') && !state.items.some(i=>i.saleStatus)) tips.push(['Track selling progress','Open Selling Center to mark listed, reserved or sold items.','open-selling']);
+    if(state.items.some(i=>i.decision==='donate') && !state.items.some(i=>i.donationOrg)) tips.push(['Track donations','Add a donation destination so nothing gets lost between boxes and drop-off.','open-donations']);
+    return tips.slice(0,3);
+  }
+
   function homeView(){
     const d=daysLeft(), p=packPercent(), r=readiness(), alerts=homeAlerts();
     const keep=state.items.filter(i=>i.decision==='keep').length;
@@ -556,8 +577,9 @@
         <button class="quick-card" data-action="open-scan"><span class="emoji">▦</span><span>Scan box</span></button>
         <button class="quick-card" data-action="go-find"><span class="emoji">⌕</span><span>Find stuff</span></button>
       </div></div>
-      <div class="section"><div class="grid-4 compact-stats"><button data-tool="essentials"><span>${essentials}</span><small>Essentials</small></button><button data-tool="tasks"><span>${state.tasks.filter(t=>!t.done).length}</span><small>Open tasks</small></button><button data-tool="declutter"><span>${donate+sell+trash}</span><small>Leaving</small></button><button data-tool="notes"><span>${state.notes.length}</span><small>Notes</small></button></div></div>
+      <div class="section"><div class="grid-4 compact-stats"><button data-tool="essentials"><span>${essentials}</span><small>Essentials</small></button><button data-tool="tasks"><span>${state.tasks.filter(t=>!t.done).length}</span><small>Open tasks</small></button><button data-tool="declutter"><span>${donate+sell+trash}</span><small>Leaving</small></button><button data-tool="setup"><span>${roomSetupPercent()}%</span><small>Room setup</small></button></div></div>
       <div class="section"><div class="grid-2"><div class="card stat"><span class="label">Open-first boxes</span><span class="value">${openFirst}</span></div><div class="card stat"><span class="label">Tasks done</span><span class="value">${taskDone()}/${state.tasks.length}</span></div></div></div>
+      ${state.settings.showSuggestionsHome&&homeSuggestions().length?`<div class="section"><div class="section-head"><h2 class="section-title">Suggested next steps</h2><button class="soft-btn small-btn" data-action="open-menu">More</button></div><div class="stack">${homeSuggestions().map(s=>`<button class="card text-left perf-item" data-action="${s[2]}"><div class="row-title">${esc(s[0])}</div><div class="row-sub wrap-text">${esc(s[1])}</div></button>`).join('')}</div></div>`:''}
       ${(pinnedItems.length||pinnedBoxes.length||pinnedNotes.length)?`<div class="section"><div class="section-head"><h2 class="section-title">Pinned</h2></div><div class="list-card">${pinnedBoxes.map(b=>`<button class="row result-row" data-action="box-detail" data-id="${b.id}"><div class="row-icon">📌</div><div class="row-main"><div class="row-title">${esc(b.code)} · ${esc(b.name)}</div><div class="row-sub">${esc(roomById(b.roomId)?.name||'No room')} · Box</div></div><span>›</span></button>`).join('')}${pinnedItems.map(i=>`<button class="row result-row" data-action="edit-item" data-id="${i.id}"><div class="row-icon">📌</div><div class="row-main"><div class="row-title">${esc(i.name)}</div><div class="row-sub">${esc(roomById(i.roomId)?.name||'No room')} · Item</div></div><span>›</span></button>`).join('')}${pinnedNotes.map(n=>`<button class="row result-row" data-action="edit-note" data-id="${n.id}"><div class="row-icon">📌</div><div class="row-main"><div class="row-title">${esc(n.title||'Move note')}</div><div class="row-sub">Move note</div></div><span>›</span></button>`).join('')}</div></div>`:''}
       ${state.settings.showDeclutterHome&&state.items.length?`<div class="section"><div class="section-head"><h2 class="section-title">Declutter snapshot</h2><button class="soft-btn small-btn" data-tool="declutter">Open</button></div><div class="grid-4 decision-grid"><button data-tool="declutter">Keep<br><b>${keep}</b></button><button data-tool="declutter">Donate<br><b>${donate}</b></button><button data-tool="declutter">Sell<br><b>${sell}</b></button><button data-tool="declutter">Trash<br><b>${trash}</b></button></div></div>`:''}
       <div class="section"><div class="section-head"><h2 class="section-title">Next tasks</h2><button class="soft-btn small-btn" data-tool="tasks">View all</button></div>${openTasks.length?`<div class="list-card">${openTasks.map(taskRow).join('')}</div>`:empty('📝','No tasks yet','Add your own tasks or generate a moving checklist only when you want one.','Open checklist','open-tasks')}</div>
@@ -576,7 +598,7 @@
         const boxes=boxesInRoom(r.id), items=itemsInRoom(r.id), packed=roomPackedPercent(r.id);
         const setup=r.setupStatus||'not-started';
         return `<article class="card room-card perf-item"><div class="card-top"><div><h3>${esc(r.name)}</h3><p>${items.length} items · ${boxes.length} boxes</p></div><div class="room-emoji">${esc(r.emoji||'🏠')}</div></div><div class="progress" style="margin-top:13px"><span style="width:${packed}%"></span></div><div class="tiny" style="margin-top:6px">${packed}% packed${r.destination?` · → ${esc(r.destination)}`:''}</div><div class="tag-row"><span class="pill gray">Setup: ${setup==='done'?'Done':setup==='in-progress'?'In progress':'Not started'}</span>${r.priority==='high'?'<span class="pill warn">Priority room</span>':''}</div><div class="mini-actions"><button class="primary-btn small-btn" data-action="room-detail" data-id="${r.id}">Open</button><button class="soft-btn small-btn" data-action="filter-room" data-id="${r.id}">Boxes</button><button class="soft-btn small-btn" data-action="edit-room" data-id="${r.id}">Edit</button></div></article>`;
-      }).join('')}</div>${state.rooms.length>VIEW_LIMIT?`<p class="tiny center-text">Showing first ${VIEW_LIMIT} rooms for smoother scrolling.</p>`:''}`:empty('🏠','No rooms yet','Add rooms such as Bedroom, Kitchen, Office, Storage or any custom space.','Add your first room','add-room')}`;
+      }).join('')}</div>${state.rooms.length>VIEW_LIMIT?`<p class="tiny center-text">Showing first ${VIEW_LIMIT} rooms for smoother scrolling.</p>`:''}`:empty('🏠','No rooms yet','Add rooms such as Bedroom, Kitchen, Office, Storage or any custom space.','Add your first room','add-room')}<div class="action-strip"><button class="soft-btn" data-action="generate-room-template">✦ Add starter room suggestions</button></div>`;
   }
 
   function boxFilterMatch(b,filter){
@@ -669,9 +691,14 @@
     if(tool==='declutter') return declutterView();
     if(tool==='pack-mode') return packModeView();
     if(tool==='move-day') return moveDayView();
+    if(tool==='loading') return loadingPlanView();
     if(tool==='unpacking') return unpackingView();
     if(tool==='essentials') return essentialsView();
     if(tool==='notes') return notesView();
+    if(tool==='selling') return sellingView();
+    if(tool==='donations') return donationsView();
+    if(tool==='storage') return storageView();
+    if(tool==='setup') return setupView();
     if(tool==='expenses') return expensesView();
     if(tool==='supplies') return suppliesView();
     if(tool==='utilities') return utilitiesView();
@@ -811,20 +838,63 @@
     return `<div class="hero"><div class="eyebrow">Quick estimate</div><h2>Will it fit?</h2><p>Compare the item’s two largest face dimensions with an opening. This is a planning aid, not a guarantee—angles, depth, handles and stair turns still matter.</p></div><div class="section"><form class="form card" id="fit-form"><div class="grid-3"><div class="field"><label>Item width</label><input type="number" step="0.1" min="0" name="iw" required></div><div class="field"><label>Item height</label><input type="number" step="0.1" min="0" name="ih" required></div><div class="field"><label>Item depth</label><input type="number" step="0.1" min="0" name="id" required></div></div><div class="grid-2"><div class="field"><label>Opening width</label><input type="number" step="0.1" min="0" name="ow" required></div><div class="field"><label>Opening height</label><input type="number" step="0.1" min="0" name="oh" required></div></div><button class="primary-btn wide" type="submit">Check fit</button></form><div id="fit-result"></div></div>`;
   }
 
+
+  function loadingPlanView(){
+    const filter=state.ui.loadingFilter||'all';
+    let boxes=state.boxes.slice();
+    if(filter==='heavy') boxes=boxes.filter(b=>Number(b.weight)>=20);
+    else if(filter==='open-first') boxes=boxes.filter(b=>b.openFirst||b.priority==='first');
+    else if(filter==='unassigned') boxes=boxes.filter(b=>!b.vehicle&&!b.loadOrder);
+    else if(filter!=='all') boxes=boxes.filter(b=>(b.vehicle||'')===filter);
+    const vehicles=uniqueOptions(state.boxes.map(b=>b.vehicle).filter(Boolean));
+    boxes.sort((a,b)=>(a.vehicle||'~').localeCompare(b.vehicle||'~')||((a.loadOrder||9999)-(b.loadOrder||9999))||a.code.localeCompare(b.code));
+    const heavy=state.boxes.filter(b=>Number(b.weight)>=20).length;
+    const openFirst=state.boxes.filter(b=>b.openFirst||b.priority==='first').length;
+    const unassigned=state.boxes.filter(b=>!b.vehicle&&!b.loadOrder).length;
+    return `<div class="hero"><div class="eyebrow">Loading Plan</div><h2>${vehicles.length||0} vehicle${vehicles.length===1?'':'s'} planned</h2><p>Assign boxes to a vehicle or trip, add load order, and keep heavy or open-first boxes visible.</p></div>
+      <div class="section"><div class="segmented"><button class="${filter==='all'?'active':''}" data-loading-filter="all">All</button><button class="${filter==='unassigned'?'active':''}" data-loading-filter="unassigned">Unassigned ${unassigned}</button><button class="${filter==='heavy'?'active':''}" data-loading-filter="heavy">Heavy ${heavy}</button><button class="${filter==='open-first'?'active':''}" data-loading-filter="open-first">Open first ${openFirst}</button>${vehicles.map(v=>`<button class="${filter===v?'active':''}" data-loading-filter="${esc(v)}">${esc(v)}</button>`).join('')}</div></div>
+      ${boxes.length?`<div class="stack">${boxes.slice(0,VIEW_LIMIT).map(b=>`<div class="card perf-item"><div class="card-top"><div><div class="eyebrow">${esc(b.vehicle||'No vehicle')} ${b.loadOrder?`· Load #${b.loadOrder}`:''}</div><h3 style="margin:0">${esc(b.code)} · ${esc(b.name)}</h3><p class="tiny">${esc(roomById(b.roomId)?.name||'No room')} · ${itemsInBox(b.id).length} items</p></div><span class="pill ${Number(b.weight)>=20?'warn':'gray'}">${b.weight?`${Number(b.weight).toFixed(1)} ${state.project.units==='in'||state.project.units==='ft'?'lb':'kg'}`:'No weight'}</span></div><div class="tag-row">${b.openFirst||b.priority==='first'?'<span class="pill good">Open first</span>':''}${b.fragile?'<span class="pill warn">Fragile</span>':''}${b.storageUnit?`<span class="pill gray">Storage: ${esc(b.storageUnit)}</span>`:''}</div><div class="mini-actions"><button class="soft-btn small-btn" data-action="box-detail" data-id="${b.id}">Open</button><button class="soft-btn small-btn" data-action="edit-box" data-id="${b.id}">Edit</button></div></div>`).join('')}</div>`:empty('🧭','No loading plan yet','Assign vehicle or load order on a box to start building your truck plan.','Add a box','add-box')}`;
+  }
+
+  function sellingView(){
+    const items=state.items.filter(i=>i.decision==='sell').slice().sort((a,b)=>(a.saleStatus||'').localeCompare(b.saleStatus||'')||a.name.localeCompare(b.name));
+    const totalEstimate=items.reduce((n,i)=>n+(Number(i.value)||0),0), sold=items.reduce((n,i)=>n+(Number(i.soldPrice)||0),0);
+    const counts={planned:items.filter(i=>!i.saleStatus||i.saleStatus==='planned').length,listed:items.filter(i=>i.saleStatus==='listed').length,reserved:items.filter(i=>i.saleStatus==='reserved').length,sold:items.filter(i=>i.saleStatus==='sold').length};
+    return `<div class="grid-2"><div class="card stat"><span class="label">Expected</span><span class="value small-value">${money(totalEstimate)}</span></div><div class="card stat"><span class="label">Sold total</span><span class="value small-value">${money(sold)}</span></div></div><div class="section"><div class="grid-4 compact-stats"><div><span>${counts.planned}</span><small>Planned</small></div><div><span>${counts.listed}</span><small>Listed</small></div><div><span>${counts.reserved}</span><small>Reserved</small></div><div><span>${counts.sold}</span><small>Sold</small></div></div></div>${items.length?`<div class="list-card">${items.slice(0,VIEW_LIMIT).map(i=>`<button class="row result-row" data-action="edit-item" data-id="${i.id}"><div class="row-icon">💸</div><div class="row-main"><div class="row-title">${esc(i.name)}</div><div class="row-sub">${esc(i.saleStatus||'planned')} · ${money(i.soldPrice||i.value||0)}${i.boxId?` · ${esc(boxById(i.boxId)?.code||'')}`:''}</div></div><span>›</span></button>`).join('')}</div>`:empty('💸','No sell items yet','Mark an item as Sell in its details to track status and proceeds.','Add item','add-item')}`;
+  }
+
+  function donationsView(){
+    const items=state.items.filter(i=>i.decision==='donate').slice().sort((a,b)=>(a.donationOrg||'').localeCompare(b.donationOrg||'')||a.name.localeCompare(b.name));
+    const grouped={}; items.forEach(i=>{const k=i.donationOrg||'No destination'; (grouped[k] ||= []).push(i);});
+    const groups=Object.entries(grouped).sort((a,b)=>a[0].localeCompare(b[0]));
+    return `<div class="hero"><div class="eyebrow">Donation Center</div><h2>${items.length} donation item${items.length===1?'':'s'}</h2><p>Track where donation items are headed so they do not get lost in the move.</p></div>${groups.length?`<div class="stack">${groups.map(([label,list])=>`<div class="card"><div class="row-title">${esc(label)}</div><div class="row-sub">${list.length} item${list.length===1?'':'s'}</div><div class="list-card" style="margin-top:10px">${list.slice(0,25).map(i=>`<button class="row result-row" data-action="edit-item" data-id="${i.id}"><div class="row-icon">🎁</div><div class="row-main"><div class="row-title">${esc(i.name)}</div><div class="row-sub">${esc(roomById(i.roomId)?.name||'No room')}${i.boxId?` · ${esc(boxById(i.boxId)?.code||'')}`:''}</div></div><span>›</span></button>`).join('')}</div></div>`).join('')}</div>`:empty('🎁','No donation items yet','Mark an item as Donate to track drop-off or donation pickup.','Add item','add-item')}`;
+  }
+
+  function storageView(){
+    const boxes=state.boxes.filter(b=>b.storageUnit||b.storageZone||b.storageShelf).slice().sort((a,b)=>(a.storageUnit||'').localeCompare(b.storageUnit||'')||(a.storageZone||'').localeCompare(b.storageZone||'')||a.code.localeCompare(b.code));
+    return `<div class="hero"><div class="eyebrow">Storage</div><h2>${boxes.length} stored box${boxes.length===1?'':'es'}</h2><p>Keep storage-unit, aisle and shelf placement searchable for the future.</p></div>${boxes.length?`<div class="list-card">${boxes.map(b=>`<button class="row result-row" data-action="box-detail" data-id="${b.id}"><div class="row-icon">🗄</div><div class="row-main"><div class="row-title">${esc(b.code)} · ${esc(b.name)}</div><div class="row-sub">${esc([b.storageUnit,b.storageZone,b.storageShelf].filter(Boolean).join(' · '))} · ${esc(roomById(b.roomId)?.name||'No room')}</div></div><span>›</span></button>`).join('')}</div>`:empty('🗄','No storage locations set','Open a box and add storage placement only when you need it.','Go to boxes','go-boxes')}`;
+  }
+
+  function setupView(){
+    const rooms=state.rooms.slice().sort((a,b)=>(a.setupStatus||'').localeCompare(b.setupStatus||'')||a.name.localeCompare(b.name));
+    const done=rooms.filter(r=>r.setupStatus==='done').length, progress=rooms.filter(r=>r.setupStatus==='in-progress').length;
+    return `<div class="hero"><div class="eyebrow">Arrival & Setup</div><h2>${done}/${rooms.length||0} rooms finished</h2><p>Use setup status, room notes and destination mapping to make the new place feel like home.</p></div><div class="section"><div class="grid-3"><div class="card stat"><span class="label">Done</span><span class="value">${done}</span></div><div class="card stat"><span class="label">In progress</span><span class="value">${progress}</span></div><div class="card stat"><span class="label">Not started</span><span class="value">${Math.max(0,rooms.length-done-progress)}</span></div></div></div>${rooms.length?`<div class="stack">${rooms.map(r=>`<div class="card perf-item"><div class="card-top"><div><h3 style="margin:0">${esc(r.emoji||'🏠')} ${esc(r.name)}</h3><p class="tiny">${r.destination?`→ ${esc(r.destination)} · `:''}${itemsInRoom(r.id).length} items · ${boxesInRoom(r.id).length} boxes</p></div><span class="pill ${r.setupStatus==='done'?'good':r.setupStatus==='in-progress'?'warn':'gray'}">${r.setupStatus==='done'?'Done':r.setupStatus==='in-progress'?'In progress':'Not started'}</span></div>${r.notes?`<p class="wrap-text">${esc(r.notes)}</p>`:''}<div class="mini-actions"><button class="soft-btn small-btn" data-action="cycle-room-setup" data-id="${r.id}">Cycle status</button><button class="soft-btn small-btn" data-action="room-detail" data-id="${r.id}">Open</button><button class="soft-btn small-btn" data-action="edit-room" data-id="${r.id}">Edit</button></div></div>`).join('')}</div>`:empty('🛋','No rooms yet','Add rooms first, then use setup status to track unpacking, assembly and room prep.','Add room','add-room')}`;
+  }
+
   function reportsView(){
     const p=packPercent(), d=declutterPercent(), u=unpackPercent(), r=readiness();
     const fragile=state.items.filter(i=>i.fragile).length, essential=state.items.filter(i=>i.essential).length, totalValue=state.items.reduce((n,i)=>n+(Number(i.value)||0),0);
     const decisions={keep:0,donate:0,sell:0,trash:0,undecided:0}; state.items.forEach(i=>decisions[i.decision||'undecided']++);
     return `<div class="hero"><div class="eyebrow">Move report</div><h2>${r}% ready</h2><p>A lightweight snapshot generated entirely from your local Hako data.</p>${journeyHTML()}</div>
       <div class="section"><div class="grid-4 compact-stats"><div><span>${p}%</span><small>Packed</small></div><div><span>${d}%</span><small>Sorted</small></div><div><span>${u}%</span><small>Unpacked</small></div><div><span>${overdueTasks().length}</span><small>Overdue</small></div></div></div>
-      <div class="section"><div class="grid-2"><div class="card stat"><span class="label">Inventory value</span><span class="value small-value">${money(totalValue)}</span></div><div class="card stat"><span class="label">Move spend</span><span class="value small-value">${money(expenseTotal())}</span></div><div class="card stat"><span class="label">Fragile items</span><span class="value">${fragile}</span></div><div class="card stat"><span class="label">Essentials</span><span class="value">${essential}</span></div></div></div>
+      <div class="section"><div class="grid-2"><div class="card stat"><span class="label">Inventory value</span><span class="value small-value">${money(totalValue)}</span></div><div class="card stat"><span class="label">Move spend</span><span class="value small-value">${money(expenseTotal())}</span></div><div class="card stat"><span class="label">Fragile items</span><span class="value">${fragile}</span></div><div class="card stat"><span class="label">Essentials</span><span class="value">${essential}</span></div><div class="card stat"><span class="label">Room setup</span><span class="value">${roomSetupPercent()}%</span></div><div class="card stat"><span class="label">Vehicles used</span><span class="value">${uniqueOptions(state.boxes.map(b=>b.vehicle).filter(Boolean)).length}</span></div></div></div>
       <div class="section"><div class="section-head"><h2 class="section-title">Declutter breakdown</h2></div><div class="grid-4 compact-stats"><div><span>${decisions.keep}</span><small>Keep</small></div><div><span>${decisions.donate}</span><small>Donate</small></div><div><span>${decisions.sell}</span><small>Sell</small></div><div><span>${decisions.trash}</span><small>Trash</small></div></div></div>
       ${state.rooms.length?`<div class="section"><div class="section-head"><h2 class="section-title">Room progress</h2></div><div class="list-card">${state.rooms.map(rm=>`<div class="row"><div class="row-icon">${esc(rm.emoji||'🏠')}</div><div class="row-main"><div class="row-title">${esc(rm.name)}</div><div class="row-sub">${itemsInRoom(rm.id).length} items · ${boxesInRoom(rm.id).length} boxes</div><div class="progress slim-progress"><span style="width:${roomPackedPercent(rm.id)}%"></span></div></div><b>${roomPackedPercent(rm.id)}%</b></div>`).join('')}</div></div>`:''}
       <div class="section grid-2"><button class="soft-btn" data-action="copy-summary">Copy summary</button><button class="primary-btn" data-action="export-csv">Export inventory CSV</button></div>`;
   }
 
   function backupView(){
-    return `<div class="about-box"><strong>Local-first backup</strong><br>Core data is stored in this browser. Item photos are kept in IndexedDB instead of the main app record so adding photos causes far less lag. Export a backup before changing phones or clearing browser data.</div><div class="section stack"><button class="primary-btn wide" data-action="export-json">⇩ Export full Hako backup</button><button class="soft-btn wide" data-action="export-csv">⇩ Export item inventory (.csv)</button><button class="soft-btn wide" data-action="import-json">⇧ Restore from backup</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div class="section"><div class="card"><div class="row-title">Included</div><div class="row-sub wrap-text">Move setup, rooms, boxes, items, compressed item photos, declutter data, tasks, budget, supplies, utilities, address changes, documents, contacts, move notes, sessions, activity, custom categories and settings.</div></div></div>`;
+    return `<div class="about-box"><strong>Local-first backup</strong><br>Core data is stored in this browser. Item photos are kept in IndexedDB instead of the main app record so adding photos causes far less lag. Export a backup before changing phones or clearing browser data.</div><div class="section stack"><button class="primary-btn wide" data-action="export-json">⇩ Export full Hako backup</button><button class="soft-btn wide" data-action="export-csv">⇩ Export item inventory (.csv)</button><button class="soft-btn wide" data-action="import-json">⇧ Restore from backup</button><button class="soft-btn wide" data-action="archive-project">🗂 Archive current move</button><input id="import-file" type="file" accept="application/json,.json" hidden></div><div class="section"><div class="card"><div class="row-title">Included</div><div class="row-sub wrap-text">Move setup, rooms, boxes, items, compressed item photos, declutter data, tasks, budget, supplies, utilities, address changes, documents, contacts, move notes, sessions, activity, custom categories and settings.</div></div></div>${state.archives.length?`<div class="section"><div class="section-head"><h2 class="section-title">Archived moves</h2><span class="tiny">${state.archives.length} saved</span></div><div class="stack">${state.archives.map(a=>`<div class="card archive-card"><div><div class="row-title">${esc(a.name||'Archived move')}</div><div class="row-sub">${new Date(a.archivedAt).toLocaleString()} · ${a.summary||''}</div></div><div class="mini-actions"><button class="soft-btn small-btn" data-action="restore-archive" data-id="${a.id}">Restore</button><button class="danger-btn small-btn" data-action="delete-archive" data-id="${a.id}">Delete</button></div></div>`).join('')}</div></div>`:''}`;
   }
 
   function settingsView(){
@@ -843,6 +913,7 @@
       <label class="setting-row card"><div><div class="row-title">Attention alerts</div><div class="row-sub">Show overdue, missing, heavy and do-not-pack alerts</div></div><input type="checkbox" data-setting="showHomeAlerts" ${state.settings.showHomeAlerts?'checked':''}></label>
       <label class="setting-row card"><div><div class="row-title">Declutter snapshot</div><div class="row-sub">Show Keep / Donate / Sell / Trash counts</div></div><input type="checkbox" data-setting="showDeclutterHome" ${state.settings.showDeclutterHome?'checked':''}></label>
       <label class="setting-row card"><div><div class="row-title">Recent activity</div><div class="row-sub">Show your latest Hako changes on Home</div></div><input type="checkbox" data-setting="showRecentActivity" ${state.settings.showRecentActivity?'checked':''}></label>
+      <label class="setting-row card"><div><div class="row-title">Suggested next steps</div><div class="row-sub">Show smart prompts based on what is still missing</div></div><input type="checkbox" data-setting="showSuggestionsHome" ${state.settings.showSuggestionsHome?'checked':''}></label>
 
       <div class="settings-label">Your own categories</div>
       ${customSection('item','Item categories',state.settings.customItemCategories,'Add categories that fit your belongings. Nothing is added to your inventory automatically.')}
@@ -866,6 +937,7 @@
         <div class="row"><div class="row-icon">☰</div><div class="row-main"><div class="row-title">Cleaner navigation</div><div class="row-sub wrap-text">Home, Rooms, Boxes and Find stay in the bottom bar. Everything else now lives in a fast hamburger menu grouped by purpose.</div></div></div>
         <div class="row"><div class="row-icon">📝</div><div class="row-main"><div class="row-title">More organization tools</div><div class="row-sub wrap-text">Move Notes, pinned items and boxes, label colors, editable expenses and supplies, custom item/container/task/expense/document/address categories, and a more configurable Home screen.</div></div></div>
         <div class="row"><div class="row-icon">🛠</div><div class="row-main"><div class="row-title">Stability and performance pass</div><div class="row-sub wrap-text">Lazy photo hydration, bounded media memory, fewer full-state writes while typing, cleaner drawer navigation, safer migrations, updated caching and large-list safeguards.</div></div></div>
+        <div class="row"><div class="row-icon">🧭</div><div class="row-main"><div class="row-title">More moving depth</div><div class="row-sub wrap-text">Loading Plan, Selling Center, Donation Center, Storage placement, Arrival & Setup, archived moves, cloned boxes, storage fields and smarter next-step suggestions.</div></div></div>
       </div></div>
       <div class="section"><div class="card"><div class="row-title">Privacy</div><div class="row-sub wrap-text">No account is required. Hako does not send your inventory to a Hako server. Exported backups are files you control.</div></div></div>`;
   }
@@ -907,13 +979,18 @@
       ['tool','tasks','✓','Checklist','Tasks and move timeline'],
       ['tool','declutter','♻','Declutter','Keep, donate, sell or trash'],
       ['tool','pack-mode','⚡','Pack Mode','Fast focused packing'],
+      ['tool','loading','🧭','Loading Plan','Vehicles, load order and heavy boxes'],
       ['tool','essentials','⭐','Essentials','First-night and do-not-pack'],
       ['tool','move-day','🚚','Move Day','Load, unload and final sweep'],
-      ['tool','unpacking','🏡','Unpacking','Settle into the new space']
+      ['tool','unpacking','🏡','Unpacking','Settle into the new space'],
+      ['tool','setup','🛋','Arrival & Setup','Assembly, installs and room setup']
     ]],
     ['Organize',[
       ['tool','notes','📝','Move Notes','Measurements, reminders and ideas'],
       ['tool','expenses','₱','Budget & Expenses','Track moving costs'],
+      ['tool','selling','💸','Selling Center','Listed, reserved and sold items'],
+      ['tool','donations','🎁','Donation Center','Destination and receipt-ready items'],
+      ['tool','storage','🗄','Storage','Storage unit, zone and shelf'],
       ['tool','supplies','▧','Packing Supplies','Boxes, tape and materials'],
       ['tool','utilities','⚡','Utilities','Old and new services'],
       ['tool','address-change','✉','Address Change','Track address updates'],
@@ -974,7 +1051,7 @@
   }
 
   function openBoxForm(id){
-    const b=state.boxes.find(x=>x.id===id)||{name:'',roomId:'',type:'Box',status:'empty',notes:'',fragile:false,openFirst:false,capacity:0,weight:0,priority:'normal',vehicle:'',loadOrder:0,missing:false,damaged:false,pinned:false,labelColor:'pink',code:''};
+    const b=state.boxes.find(x=>x.id===id)||{name:'',roomId:'',type:'Box',status:'empty',notes:'',fragile:false,openFirst:false,capacity:0,weight:0,priority:'normal',vehicle:'',loadOrder:0,missing:false,damaged:false,pinned:false,labelColor:'pink',storageUnit:'',storageZone:'',storageShelf:'',code:''};
     const boxTypes=uniqueOptions(BUILTIN_BOX_TYPES,state.settings.customBoxTypes,[b.type]);
     openSheet(id?'Edit box':'Add box',`<form class="form" id="box-form" data-id="${id||''}">
       ${id?`<div class="field"><label>Stable box code</label><input readonly value="${esc(b.code)}"><div class="tiny">This code stays the same even if the box moves rooms.</div></div>`:''}
@@ -983,6 +1060,7 @@
       <div class="grid-3"><div class="field"><label>Status</label><select name="status">${['empty','packing','sealed','loaded','unloaded','unpacked'].map(x=>`<option value="${x}" ${b.status===x?'selected':''}>${statusLabel(x)}</option>`).join('')}</select></div><div class="field"><label>Priority</label><select name="priority">${[['normal','Normal'],['first','Open first'],['high','High'],['low','Low']].map(([v,l])=>`<option value="${v}" ${b.priority===v?'selected':''}>${l}</option>`).join('')}</select></div><div class="field"><label>Label color</label><select name="labelColor">${[['pink','Pink'],['red','Red'],['orange','Orange'],['yellow','Yellow'],['green','Green'],['blue','Blue'],['purple','Purple'],['gray','Gray']].map(([v,l])=>`<option value="${v}" ${b.labelColor===v?'selected':''}>${l}</option>`).join('')}</select></div></div>
       <div class="grid-2"><div class="field"><label>Capacity %</label><input type="number" min="0" max="100" step="5" name="capacity" value="${clamp(b.capacity,0,100)}"></div><div class="field"><label>Approx. weight (${state.project.units==='in'||state.project.units==='ft'?'lb':'kg'})</label><input type="number" min="0" step="0.1" name="weight" value="${Number(b.weight)||''}"></div></div>
       <div class="grid-2"><div class="field"><label>Vehicle / trip</label><input name="vehicle" maxlength="40" value="${esc(b.vehicle||'')}" placeholder="Truck 1"></div><div class="field"><label>Load order</label><input type="number" min="0" step="1" name="loadOrder" value="${Number(b.loadOrder)||''}" placeholder="1"></div></div>
+      <details class="details-card"><summary>Storage placement (optional)</summary><div class="form details-body"><div class="grid-3"><div class="field"><label>Storage unit</label><input name="storageUnit" maxlength="40" value="${esc(b.storageUnit||'')}" placeholder="Unit A"></div><div class="field"><label>Zone / aisle</label><input name="storageZone" maxlength="40" value="${esc(b.storageZone||'')}" placeholder="Zone 2"></div><div class="field"><label>Shelf / stack</label><input name="storageShelf" maxlength="40" value="${esc(b.storageShelf||'')}" placeholder="Shelf 4"></div></div></div></details>
       <div class="field"><label>Notes</label><textarea name="notes" maxlength="600" placeholder="Plates, mugs, charger…">${esc(b.notes||'')}</textarea></div>
       <div class="grid-2"><label class="check-card"><input type="checkbox" name="fragile" ${b.fragile?'checked':''}> Fragile</label><label class="check-card"><input type="checkbox" name="openFirst" ${b.openFirst?'checked':''}> Open first</label><label class="check-card"><input type="checkbox" name="pinned" ${b.pinned?'checked':''}> Pin / important</label><label class="check-card"><input type="checkbox" name="missing" ${b.missing?'checked':''}> Missing</label><label class="check-card"><input type="checkbox" name="damaged" ${b.damaged?'checked':''}> Damaged</label></div>
       <div class="form-actions">${id?`<button type="button" class="danger-btn" data-action="delete-box" data-id="${id}">Delete</button>`:`<button type="button" class="soft-btn" data-action="close-modal">Cancel</button>`}<button class="primary-btn" type="submit">Save box</button></div>
@@ -1083,7 +1161,7 @@
     openSheet(`${b.code} · ${b.name}`,`<div class="stack"><div class="card"><div class="card-top"><div><span class="pill">${statusLabel(b.status)}</span><h3 style="margin:10px 0 4px">${esc(r?.name||'No room')}</h3><p class="tiny">${esc(b.type||'Box')}${b.fragile?' · Fragile':''}${b.openFirst||b.priority==='first'?' · Open first':''}${b.vehicle?` · ${esc(b.vehicle)}`:''}</p></div><button class="soft-btn small-btn" data-action="box-label" data-id="${b.id}">Label</button></div><div class="box-meter detail-meter"><span><b>${clamp(b.capacity,0,100)}%</b> full</span><div class="progress"><span style="width:${clamp(b.capacity,0,100)}%"></span></div><span>${b.weight?`${Number(b.weight).toFixed(1)} ${state.project.units==='in'||state.project.units==='ft'?'lb':'kg'}`:'No weight'}</span></div>${b.notes?`<p class="wrap-text">${esc(b.notes)}</p>`:''}<div class="tag-row">${b.missing?'<span class="pill warn">MISSING</span>':''}${b.damaged?'<span class="pill warn">DAMAGED</span>':''}<span class="pill gray">${priorityLabel(b.priority)}</span></div></div>
       <div class="grid-3"><button class="soft-btn" data-action="set-box-status" data-id="${id}" data-value="packing">Packing</button><button class="soft-btn" data-action="set-box-status" data-id="${id}" data-value="sealed">Seal</button><button class="soft-btn" data-action="set-box-status" data-id="${id}" data-value="loaded">Load</button></div>
       <div class="section-head"><h3 class="section-title">Contents (${items.length})</h3><button class="primary-btn small-btn" data-action="add-item-to-box" data-id="${b.id}">＋ Item</button></div>${items.length?`<div class="list-card">${items.slice(0,100).map(itemRow).join('')}</div>`:empty('📭','Box is empty','Add items as you pack them.')}
-      <div class="grid-2"><button class="soft-btn" data-action="edit-box" data-id="${b.id}">Edit box</button><button class="primary-btn" data-action="share-box" data-id="${b.id}">Share box</button></div></div>`,{focus:false});
+      ${(b.storageUnit||b.storageZone||b.storageShelf)?`<div class="card"><div class="row-title">Storage placement</div><div class="row-sub">${esc([b.storageUnit,b.storageZone,b.storageShelf].filter(Boolean).join(' · ')||'Not set')}</div></div>`:''}<div class="grid-3"><button class="soft-btn" data-action="edit-box" data-id="${b.id}">Edit box</button><button class="soft-btn" data-action="duplicate-box" data-id="${b.id}">Clone box</button><button class="primary-btn" data-action="share-box" data-id="${b.id}">Share box</button></div></div>`,{focus:false});
   }
 
   function openLabel(id){
@@ -1135,6 +1213,49 @@
   function csvCell(v){const s=String(v??'');return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s;}
   function blobToDataURL(blob){ return new Promise((resolve,reject)=>{const fr=new FileReader();fr.onload=()=>resolve(fr.result);fr.onerror=reject;fr.readAsDataURL(blob);}); }
   async function dataURLToBlob(data){ return await (await fetch(data)).blob(); }
+
+
+  function cloneBox(boxId){
+    const source=boxById(boxId); if(!source) return null;
+    const copy={...structuredClone(source), id:uid('box'), code:nextBoxCode(source.roomId), name:`${source.name} (copy)`, status:'empty', missing:false, damaged:false, loadOrder:0};
+    state.boxes.push(copy);
+    return copy;
+  }
+
+  function generateRoomTemplate(){
+    const templates={
+      'Home move':['Bedroom','Bathroom','Kitchen','Living Room','Entryway','Office'],
+      'Room reset':['Main room','Closet','Desk / work area','Storage'],
+      'Office move':['Reception','Work area','Storage','Meeting room','Pantry'],
+      'Storage / organization':['Storage','Keep','Donate / Sell','Archive']
+    };
+    const names=templates[state.project.moveType]||templates['Home move'];
+    let added=0;
+    for(const name of names){ if(state.rooms.some(r=>normalize(r.name)===normalize(name))) continue; state.rooms.push({id:uid('room'),name,emoji:'🏠',destination:'',priority:'normal',setupStatus:'not-started',notes:''}); added++; }
+    if(added){ commit(`Added ${added} starter rooms`); } else toast('Those starter rooms already exist.');
+  }
+
+  function archiveCurrentProject(){
+    const contentCount=['rooms','boxes','items','tasks','expenses','supplies','utilities','addressChanges','documents','contacts','notes'].reduce((n,k)=>n+(state[k]?.length||0),0);
+    if(!contentCount){ toast('There is nothing to archive yet.'); return; }
+    const snapshot=structuredClone(state);
+    snapshot.archives=[];
+    snapshot.ui={...DEFAULT.ui};
+    const entry={id:uid('arch'),name:state.project.name||`Move ${fmtDate(state.project.moveDate)}`,archivedAt:nowISO(),summary:`${state.rooms.length} rooms · ${state.boxes.length} boxes · ${state.items.length} items`,data:snapshot};
+    state.archives.unshift(entry); state.archives=state.archives.slice(0,12);
+    const preserved=structuredClone(state.archives);
+    state=cloneDefault(); state.archives=preserved; state.hasOnboarded=true; derivedDirty=true; saveState(true); render(); toast('Current move archived');
+  }
+
+  function restoreArchive(id){
+    const entry=state.archives.find(a=>a.id===id); if(!entry) return;
+    const preserved=structuredClone(state.archives);
+    const restored=migrateState(structuredClone(entry.data));
+    restored.archives=preserved;
+    restored.hasOnboarded=true;
+    restored.ui={...DEFAULT.ui,tool:'backup'};
+    state=restored; derivedDirty=true; saveState(true); render(); toast('Archive restored');
+  }
 
   async function exportBackup(){
     toast('Preparing backup…');
@@ -1318,7 +1439,7 @@
 
     if(f.id==='box-form'){
       const id=f.dataset.id,roomId=fd.get('roomId')||'';
-      const obj={id:id||uid('box'),code:id?(state.boxes.find(x=>x.id===id)?.code||nextBoxCode(roomId)):nextBoxCode(roomId),name:String(fd.get('name')).trim(),roomId,type:fd.get('type')||'Box',status:fd.get('status')||'empty',capacity:clamp(fd.get('capacity'),0,100),weight:Math.max(0,Number(fd.get('weight'))||0),priority:fd.get('priority')||'normal',labelColor:fd.get('labelColor')||'pink',vehicle:String(fd.get('vehicle')||'').trim(),loadOrder:Math.max(0,Number(fd.get('loadOrder'))||0),notes:String(fd.get('notes')||'').trim(),fragile:fd.get('fragile')==='on',openFirst:fd.get('openFirst')==='on',pinned:fd.get('pinned')==='on',missing:fd.get('missing')==='on',damaged:fd.get('damaged')==='on'};
+      const obj={id:id||uid('box'),code:id?(state.boxes.find(x=>x.id===id)?.code||nextBoxCode(roomId)):nextBoxCode(roomId),name:String(fd.get('name')).trim(),roomId,type:fd.get('type')||'Box',status:fd.get('status')||'empty',capacity:clamp(fd.get('capacity'),0,100),weight:Math.max(0,Number(fd.get('weight'))||0),priority:fd.get('priority')||'normal',labelColor:fd.get('labelColor')||'pink',vehicle:String(fd.get('vehicle')||'').trim(),loadOrder:Math.max(0,Number(fd.get('loadOrder'))||0),storageUnit:String(fd.get('storageUnit')||'').trim(),storageZone:String(fd.get('storageZone')||'').trim(),storageShelf:String(fd.get('storageShelf')||'').trim(),notes:String(fd.get('notes')||'').trim(),fragile:fd.get('fragile')==='on',openFirst:fd.get('openFirst')==='on',pinned:fd.get('pinned')==='on',missing:fd.get('missing')==='on',damaged:fd.get('damaged')==='on'};
       if(obj.openFirst&&obj.priority==='normal')obj.priority='first';
       const childItems=state.items.filter(i=>i.boxId===obj.id);
       if(childItems.length&&obj.status==='empty')obj.status='packing';
@@ -1437,6 +1558,8 @@
     }
     const taskFilter=e.target.closest('[data-task-filter]');
     if(taskFilter){state.ui.taskFilter=taskFilter.dataset.taskFilter;saveState(false);render();return;}
+    const loadingFilter=e.target.closest('[data-loading-filter]');
+    if(loadingFilter){state.ui.loadingFilter=loadingFilter.dataset.loadingFilter;saveState(false);render();return;}
     const declutterFilter=e.target.closest('[data-declutter-filter]');
     if(declutterFilter){state.ui.declutterFilter=declutterFilter.dataset.declutterFilter;saveState(false);render();return;}
     const packRoom=e.target.closest('[data-pack-room]');
@@ -1468,12 +1591,16 @@
     if(a==='open-menu'){openMenu();return;}
     if(a==='recover-home'){state=migrateState(state);state.ui={...DEFAULT.ui,tab:'home'};derivedDirty=true;saveState(true);render();toast('Hako is ready');return;}
     if(a==='open-project'){openSetup(false);return;}
+    if(a==='open-loading'){state.ui.tool='loading';saveState(false);render();return;}
+    if(a==='open-selling'){state.ui.tool='selling';saveState(false);render();return;}
+    if(a==='open-donations'){state.ui.tool='donations';saveState(false);render();return;}
     if(a==='quick-add'){
       openSheet('Quick add',`<div class="tool-grid"><button class="tool-card" data-action="quick-pack-add"><span class="tool-icon">⚡</span><h3>Quick Pack</h3><p>Add multiple items continuously</p></button><button class="tool-card" data-action="add-box"><span class="tool-icon">📦</span><h3>Box</h3><p>Create a container</p></button><button class="tool-card" data-action="add-room"><span class="tool-icon">🏠</span><h3>Room</h3><p>Add a space</p></button><button class="tool-card" data-action="add-task"><span class="tool-icon">✓</span><h3>Task</h3><p>Add a checklist item</p></button><button class="tool-card" data-action="open-scan"><span class="tool-icon">▦</span><h3>Scan</h3><p>Find a labeled box</p></button><button class="tool-card" data-action="add-expense"><span class="tool-icon">₱</span><h3>Expense</h3><p>Track a moving cost</p></button></div>`,{focus:false});return;
     }
     if(a==='open-tasks'){state.ui.tool='tasks';saveState(false);render();return;}
 
     if(a==='add-room'){openRoomForm();return;}
+    if(a==='generate-room-template'){generateRoomTemplate();return;}
     if(a==='edit-room'){openRoomForm(id);return;}
     if(a==='room-detail'){openRoomDetail(id);return;}
     if(a==='delete-room'){
@@ -1498,6 +1625,7 @@
       }return;
     }
     if(a==='box-detail'){openBoxDetail(id);return;}
+    if(a==='duplicate-box'){const c=cloneBox(id); if(c){closeModal(); commit(`Cloned box ${c.code}`); setTimeout(()=>openBoxDetail(c.id),35);} return;}
     if(a==='box-label'){openLabel(id);return;}
     if(a==='set-box-status'){
       const b=state.boxes.find(x=>x.id===id); if(!b)return;
@@ -1579,6 +1707,9 @@
       try{if(navigator.share)await navigator.share({title:`Hako ${b.code}`,text});else{await navigator.clipboard.writeText(text);toast('Box summary copied');}}catch(_){}return;
     }
 
+    if(a==='archive-project'){if(confirm('Archive the current move and start with a fresh Hako workspace? You can restore it later.')) archiveCurrentProject();return;}
+    if(a==='restore-archive'){if(confirm('Restore this archived move into the current workspace?')) restoreArchive(id);return;}
+    if(a==='delete-archive'){if(confirm('Delete this archived move snapshot?')){state.archives=state.archives.filter(a=>a.id!==id); saveState(true); render(); toast('Archive deleted');}return;}
     if(a==='export-json'){await exportBackup();return;}
     if(a==='export-csv'){exportCSV();return;}
     if(a==='import-json'){document.getElementById('import-file')?.click();return;}

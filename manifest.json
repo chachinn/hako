@@ -1,7 +1,7 @@
 {
   "name": "Hako — Moving & Decluttering",
   "short_name": "Hako",
-  "description": "Plan, sort, pack, label, find, move and unpack with a cute offline-first moving companion.",
+  "description": "Plan, sort, pack, label, find, move, load and unpack with a cute offline-first moving companion.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
