@@ -1,14 +1,14 @@
 {
   "name": "Hako — Moving & Decluttering",
   "short_name": "Hako",
-  "description": "Plan, pack, label, find, move and unpack — all in one cute local-first app.",
+  "description": "Plan, sort, pack, label, find, move and unpack with a cute offline-first moving companion.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait-primary",
-  "background_color": "#fff8fb",
+  "background_color": "#fff9fc",
   "theme_color": "#f77fa4",
   "categories": ["lifestyle", "productivity", "utilities"],
   "icons": [
@@ -21,6 +21,7 @@
     {"src":"icons/maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}
   ],
   "shortcuts": [
+    {"name":"Quick Pack","short_name":"Quick Pack","url":"./?tool=pack-mode","icons":[{"src":"icons/icon-96.png","sizes":"96x96"}]},
     {"name":"Add Box","short_name":"Add Box","url":"./?action=add-box","icons":[{"src":"icons/icon-96.png","sizes":"96x96"}]},
     {"name":"Find My Stuff","short_name":"Find","url":"./?tab=find","icons":[{"src":"icons/icon-96.png","sizes":"96x96"}]},
     {"name":"Move Day","short_name":"Move Day","url":"./?tool=move-day","icons":[{"src":"icons/icon-96.png","sizes":"96x96"}]}

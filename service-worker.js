@@ -1,18 +1,9 @@
-const CACHE = 'hako-shell-v1.0.0';
+const CACHE = 'hako-shell-v2.0.0';
 const APP_SHELL = [
-  './',
-  './index.html',
-  './style.css',
-  './app.js',
-  './manifest.json',
-  './icons/icon-48.png',
-  './icons/icon-72.png',
-  './icons/icon-96.png',
-  './icons/icon-192.png',
-  './icons/icon-512.png',
-  './icons/maskable-192.png',
-  './icons/maskable-512.png',
-  './icons/apple-touch-icon.png'
+  './', './index.html', './style.css', './app.js', './manifest.json',
+  './icons/icon-48.png', './icons/icon-72.png', './icons/icon-96.png',
+  './icons/icon-192.png', './icons/icon-512.png',
+  './icons/maskable-192.png', './icons/maskable-512.png', './icons/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', event => {
@@ -21,30 +12,42 @@ self.addEventListener('install', event => {
 
 self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('hako-') && k !== CACHE).map(k => caches.delete(k))))
+    caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith('hako-shell-') && k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
 
+self.addEventListener('message', event => {
+  if (event.data === 'SKIP_WAITING') self.skipWaiting();
+});
+
 self.addEventListener('fetch', event => {
-  const req = event.request;
-  if (req.method !== 'GET') return;
-  const url = new URL(req.url);
+  const request = event.request;
+  if (request.method !== 'GET') return;
+  const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  if (req.mode === 'navigate') {
-    event.respondWith(fetch(req).then(res => {
-      const copy = res.clone();
-      caches.open(CACHE).then(cache => cache.put('./index.html', copy));
-      return res;
-    }).catch(() => caches.match('./index.html')));
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).then(response => {
+        const copy = response.clone();
+        caches.open(CACHE).then(cache => cache.put('./index.html', copy)).catch(() => {});
+        return response;
+      }).catch(() => caches.match('./index.html').then(r => r || caches.match('./')))
+    );
     return;
   }
 
   event.respondWith(
-    caches.match(req).then(cached => cached || fetch(req).then(res => {
-      if (res && res.ok) caches.open(CACHE).then(cache => cache.put(req, res.clone()));
-      return res;
-    }))
+    caches.match(request).then(cached => {
+      if (cached) return cached;
+      return fetch(request).then(response => {
+        if (response && response.ok && ['style','script','image','manifest'].includes(request.destination)) {
+          const copy = response.clone();
+          caches.open(CACHE).then(cache => cache.put(request, copy)).catch(() => {});
+        }
+        return response;
+      });
+    })
   );
 });
